@@ -45,12 +45,16 @@ def get_news():
         "Content-Type": "application/json"
     }
 
+
+    PROMPT = "Проверь только официальные источники (OFAC, BIS, EUR-Lex, EC) на новые санкции против РФ за последние 24 часа.Если есть — дай до 3 кратких пунктов с ссылками.Если нет — одна строка: 'Новых санкций за 24 часа не опубликовано.'"
+
+
     payload = {
         "model": "sonar-pro",
         "messages": [
             {
                 "role": "user",
-                "content": "3 короткие сегодня. Санкции против РФ."
+                "content": PROMPT
             }
         ],
         "temperature": 0
@@ -68,10 +72,9 @@ def get_news():
         "max_tokens": 1
     }
 
-    response = requests.post(url, json=test_payload, headers=headers, timeout=20)
-    print(response, response.headers, response.text)
+    response = requests.post(url, json=payload, headers=headers, timeout=40)
     response.raise_for_status()
-
+    print(response.json())
     return response.json()["choices"][0]["message"]["content"]
 
 
