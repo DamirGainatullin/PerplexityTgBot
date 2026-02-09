@@ -8,6 +8,9 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from pathlib import Path
+
 
 # ================== ENV ==================
 load_dotenv()
@@ -29,12 +32,25 @@ conn = sqlite3.connect("bot.db")
 cursor = conn.cursor()
 
 cursor.execute("""
+CREATE TABLE IF NOT EXISTS chats (
+    chat_id INTEGER PRIMARY KEY
+)
+""")
+
+cursor.execute("""
 CREATE TABLE IF NOT EXISTS news_requests (
     chat_id INTEGER PRIMARY KEY,
     last_date TEXT
 )
 """)
+
 conn.commit()
+
+# ================== PROMPT ==================
+def load_prompt():
+    prompt_path = Path(__file__).parent / "prompt.txt"
+    return prompt_path.read_text(encoding="utf-8")
+
 
 # ================== PERPLEXITY ==================
 def get_news():
@@ -45,9 +61,7 @@ def get_news():
         "Content-Type": "application/json"
     }
 
-
-    PROMPT = "Проверь только официальные источники (OFAC, BIS, EUR-Lex, EC) на новые санкции против РФ за последние 24 часа.Если есть — дай до 3 кратких пунктов с ссылками.Если нет — одна строка: 'Новых санкций за 24 часа не опубликовано.'"
-
+    PROMPT = load_prompt()
 
     payload = {
         "model": "sonar-pro",
@@ -94,6 +108,12 @@ async def send_news(message: types.Message):
     today = date.today().isoformat()
 
     cursor.execute(
+        "INSERT OR IGNORE INTO chats (chat_id) VALUES (?)",
+        (chat_id,)
+    )
+    conn.commit()
+
+    cursor.execute(
         "SELECT last_date FROM news_requests WHERE chat_id = ?",
         (chat_id,)
     )
@@ -102,7 +122,7 @@ async def send_news(message: types.Message):
     if row and row[0] == today:
         await message.answer(
             "Новости уже публиковались сегодня.\n"
-            "Попробуйте завтра."
+            "Теперь они будут приходить автоматически."
         )
         return
 
@@ -110,7 +130,7 @@ async def send_news(message: types.Message):
 
     try:
         news = get_news()
-        print(news)
+        # print(news)
         cursor.execute(
             "INSERT OR REPLACE INTO news_requests (chat_id, last_date) VALUES (?, ?)",
             (chat_id, today)
@@ -123,8 +143,52 @@ async def send_news(message: types.Message):
         await message.answer("Не удалось получить новости")
 
 
+async def send_daily_news():
+    today = date.today().isoformat()
+
+    cursor.execute("SELECT chat_id FROM chats")
+    chats = cursor.fetchall()
+
+    for (chat_id,) in chats:
+        cursor.execute(
+            "SELECT last_date FROM news_requests WHERE chat_id = ?",
+            (chat_id,)
+        )
+        row = cursor.fetchone()
+
+        if row and row[0] == today:
+            continue  # уже отправляли
+
+        try:
+            news = get_news()
+
+            cursor.execute(
+                "INSERT OR REPLACE INTO news_requests (chat_id, last_date) VALUES (?, ?)",
+                (chat_id, today)
+            )
+            conn.commit()
+
+            await bot.send_message(
+                chat_id,
+                f"Сводка санкционных новостей:\n\n{news}"
+            )
+
+        except Exception as e:
+            print(f"Ошибка для чата {chat_id}: {e}")
+
+
 # ================== START ==================
 async def main():
+    scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+
+    scheduler.add_job(
+        send_daily_news,
+        trigger="cron",
+        hour=9,
+        minute=0
+    )
+
+    scheduler.start()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
