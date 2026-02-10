@@ -44,6 +44,14 @@ CREATE TABLE IF NOT EXISTS news_requests (
 )
 """)
 
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS daily_news_cache (
+    date TEXT PRIMARY KEY,
+    content TEXT
+)
+""")
+
+
 conn.commit()
 
 # ================== PROMPT ==================
@@ -92,6 +100,79 @@ def get_news():
     return response.json()["choices"][0]["message"]["content"]
 
 
+def is_monday() -> bool:
+    return date.today().weekday() == 0  # Monday
+
+
+def get_weekly_cache():
+    cursor.execute("""
+        SELECT date, content
+        FROM daily_news_cache
+        WHERE date >= date('now', '-7 days')
+        ORDER BY date ASC
+    """)
+    return cursor.fetchall()
+
+
+def cleanup_old_cache():
+    cursor.execute("""
+        DELETE FROM daily_news_cache
+        WHERE date < date('now', '-7 days')
+    """)
+    conn.commit()
+
+
+def get_news_for_today() -> str:
+    today = date.today().isoformat()
+
+    if is_monday():
+        weekly = get_weekly_cache()
+        today_news = get_news()
+
+        parts = ["Сводка санкционных новостей за прошлую неделю:\n"]
+
+        for d, text in weekly:
+            parts.append(f"{d}\n{text}\n")
+
+        parts.append("Обновления за последние 24 часа:\n")
+        parts.append(today_news)
+
+        final_text = "\n".join(parts)
+
+        # очищаем всё старше недели
+        cleanup_old_cache()
+
+        # сохраняем только сегодняшний день
+        cursor.execute(
+            "INSERT OR REPLACE INTO daily_news_cache (date, content) VALUES (?, ?)",
+            (today, today_news)
+        )
+        conn.commit()
+
+        return final_text
+
+    # if not Monday
+    cursor.execute(
+        "SELECT content FROM daily_news_cache WHERE date = ?",
+        (today,)
+    )
+    row = cursor.fetchone()
+
+    if row:
+        return row[0]
+
+    news = get_news()
+
+    cursor.execute(
+        "INSERT INTO daily_news_cache (date, content) VALUES (?, ?)",
+        (today, news)
+    )
+    conn.commit()
+
+    cleanup_old_cache()
+    return news
+
+
 # ================== HANDLERS ==================
 @dp.message(CommandStart())
 async def start(message: types.Message):
@@ -129,8 +210,8 @@ async def send_news(message: types.Message):
     await message.answer("Собираю новости...")
 
     try:
-        news = get_news()
-        # print(news)
+        news = get_news_for_today()
+
         cursor.execute(
             "INSERT OR REPLACE INTO news_requests (chat_id, last_date) VALUES (?, ?)",
             (chat_id, today)
@@ -139,8 +220,10 @@ async def send_news(message: types.Message):
 
         await message.answer(f"Сводка новостей:\n\n{news}")
 
-    except Exception:
+    except Exception as e:
+        print(e)
         await message.answer("Не удалось получить новости")
+
 
 
 async def send_daily_news():
@@ -148,6 +231,12 @@ async def send_daily_news():
 
     cursor.execute("SELECT chat_id FROM chats")
     chats = cursor.fetchall()
+
+    try:
+        news = get_news_for_today()
+    except Exception as e:
+        print("Ошибка получения новостей:", e)
+        return
 
     for (chat_id,) in chats:
         cursor.execute(
@@ -157,24 +246,18 @@ async def send_daily_news():
         row = cursor.fetchone()
 
         if row and row[0] == today:
-            continue  # уже отправляли
+            continue
 
-        try:
-            news = get_news()
+        cursor.execute(
+            "INSERT OR REPLACE INTO news_requests (chat_id, last_date) VALUES (?, ?)",
+            (chat_id, today)
+        )
+        conn.commit()
 
-            cursor.execute(
-                "INSERT OR REPLACE INTO news_requests (chat_id, last_date) VALUES (?, ?)",
-                (chat_id, today)
-            )
-            conn.commit()
-
-            await bot.send_message(
-                chat_id,
-                f"Сводка санкционных новостей:\n\n{news}"
-            )
-
-        except Exception as e:
-            print(f"Ошибка для чата {chat_id}: {e}")
+        await bot.send_message(
+            chat_id,
+            f"Сводка санкционных новостей:\n\n{news}"
+        )
 
 
 # ================== START ==================
