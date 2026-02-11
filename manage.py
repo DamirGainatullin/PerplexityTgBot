@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS daily_news_cache (
 
 conn.commit()
 
+
 # ================== PROMPT ==================
 def load_prompt():
     prompt_path = Path(__file__).parent / "prompt.txt"
@@ -80,18 +81,6 @@ def get_news():
             }
         ],
         "temperature": 0
-    }
-
-    # Test API ping
-    test_payload = {
-        "model": "sonar",
-        "messages": [
-            {
-                "role": "user",
-                "content": "ping"
-            }
-        ],
-        "max_tokens": 1
     }
 
     response = requests.post(url, json=payload, headers=headers, timeout=40)
@@ -124,34 +113,39 @@ def cleanup_old_cache():
 
 def get_news_for_today() -> str:
     today = date.today().isoformat()
+    today_news = None
 
     if is_monday():
         weekly = get_weekly_cache()
-        today_news = get_news()
+        today_news = get_news()  # один запрос
 
         parts = ["Сводка санкционных новостей за прошлую неделю:\n"]
 
+        # добавляем ТОЛЬКО реальные записи
         for d, text in weekly:
-            parts.append(f"{d}\n{text}\n")
+            if text and text != "NO_NEWS_LAST_24_HOURS":
+                parts.append(f"📅 {d}\n{text}\n")
 
-        parts.append("Обновления за последние 24 часа:\n")
-        parts.append(today_news)
+        # блок за последние 24 часа
+        if today_news == "NO_NEWS_LAST_24_HOURS":
+            parts.append("За последние 24 часа новых санкционных новостей не опубликовано.")
+        else:
+            parts.append("Обновления за последние 24 часа:\n")
+            parts.append(today_news)
 
         final_text = "\n".join(parts)
 
-        # очищаем всё старше недели
         cleanup_old_cache()
 
-        # сохраняем только сегодняшний день
-        cursor.execute(
-            "INSERT OR REPLACE INTO daily_news_cache (date, content) VALUES (?, ?)",
-            (today, today_news)
-        )
-        conn.commit()
+        if today_news != "NO_NEWS_LAST_24_HOURS":
+            cursor.execute(
+                "INSERT INTO daily_news_cache (date, content) VALUES (?, ?)",
+                (today, today_news)
+            )
+            conn.commit()
 
         return final_text
 
-    # if not Monday
     cursor.execute(
         "SELECT content FROM daily_news_cache WHERE date = ?",
         (today,)
@@ -161,16 +155,19 @@ def get_news_for_today() -> str:
     if row:
         return row[0]
 
-    news = get_news()
+    today_news = get_news()
+
+    if today_news == "NO_NEWS_LAST_24_HOURS":
+        return "За последние 24 часа новых санкционных новостей не опубликовано."
 
     cursor.execute(
         "INSERT INTO daily_news_cache (date, content) VALUES (?, ?)",
-        (today, news)
+        (today, today_news)
     )
     conn.commit()
 
     cleanup_old_cache()
-    return news
+    return today_news
 
 
 # ================== HANDLERS ==================
@@ -202,8 +199,8 @@ async def send_news(message: types.Message):
 
     if row and row[0] == today:
         await message.answer(
-            "Новости уже публиковались сегодня.\n"
-            "Теперь они будут приходить автоматически."
+            "Сегодня новости уже публиковались.\n"
+            "Теперь они будут приходить автоматически в 9:00."
         )
         return
 
@@ -223,7 +220,6 @@ async def send_news(message: types.Message):
     except Exception as e:
         print(e)
         await message.answer("Не удалось получить новости")
-
 
 
 async def send_daily_news():
