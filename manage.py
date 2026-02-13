@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pathlib import Path
 
+from sources import collect_all_news
+
 
 # ================== ENV ==================
 load_dotenv()
@@ -26,8 +28,15 @@ keyboard = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text="Новости")]],
     resize_keyboard=True
 )
+# ================== PROMPT ===================
 
-# ================== DATABASE (SQLite) ==================
+
+def load_prompt():
+    prompt_path = Path(__file__).parent / "prompt.txt"
+    return prompt_path.read_text(encoding="utf-8")
+
+
+# ================== DATABASE ==================
 conn = sqlite3.connect("bot.db")
 cursor = conn.cursor()
 
@@ -51,18 +60,13 @@ CREATE TABLE IF NOT EXISTS daily_news_cache (
 )
 """)
 
-
 conn.commit()
 
-
-# ================== PROMPT ==================
-def load_prompt():
-    prompt_path = Path(__file__).parent / "prompt.txt"
-    return prompt_path.read_text(encoding="utf-8")
+NO_NEWS = "NO_NEWS_LAST_24_HOURS"
 
 
 # ================== PERPLEXITY ==================
-def get_news():
+def ask_model(materials: str) -> str:
     url = "https://api.perplexity.ai/chat/completions"
 
     headers = {
@@ -73,78 +77,35 @@ def get_news():
     PROMPT = load_prompt()
 
     payload = {
-        "model": "sonar-pro",
+        "model": "sonar",
+        "disable_search": True,
+        "temperature": 0.1,
         "messages": [
             {
-                "role": "user",
+                "role": "system",
                 "content": PROMPT
+            },
+            {
+                "role": "user",
+                "content": materials
             }
-        ],
-        "temperature": 0
+        ]
     }
 
-    response = requests.post(url, json=payload, headers=headers, timeout=40)
+    response = requests.post(url, json=payload, headers=headers, timeout=60)
     response.raise_for_status()
-    print(response.json())
-    return response.json()["choices"][0]["message"]["content"]
+
+    result = response.json()["choices"][0]["message"]["content"].strip()
+    print(result)
+    if result == "NO_NEWS_LAST_24_HOURS":
+        return "За последние 24 часа санкционных новостей, потенциально затрагивающих РФ, не опубликовано."
+
+    return result
 
 
-def is_monday() -> bool:
-    return date.today().weekday() == 0  # Monday
-
-
-def get_weekly_cache():
-    cursor.execute("""
-        SELECT date, content
-        FROM daily_news_cache
-        WHERE date >= date('now', '-7 days')
-        ORDER BY date ASC
-    """)
-    return cursor.fetchall()
-
-
-def cleanup_old_cache():
-    cursor.execute("""
-        DELETE FROM daily_news_cache
-        WHERE date < date('now', '-7 days')
-    """)
-    conn.commit()
-
-
+# ================== BUSINESS LOGIC ==================
 def get_news_for_today() -> str:
     today = date.today().isoformat()
-    today_news = None
-
-    if is_monday():
-        weekly = get_weekly_cache()
-        today_news = get_news()  # один запрос
-
-        parts = ["Сводка санкционных новостей за прошлую неделю:\n"]
-
-        # добавляем ТОЛЬКО реальные записи
-        for d, text in weekly:
-            if text and text != "NO_NEWS_LAST_24_HOURS":
-                parts.append(f"📅 {d}\n{text}\n")
-
-        # блок за последние 24 часа
-        if today_news == "NO_NEWS_LAST_24_HOURS":
-            parts.append("За последние 24 часа новых санкционных новостей не опубликовано.")
-        else:
-            parts.append("Обновления за последние 24 часа:\n")
-            parts.append(today_news)
-
-        final_text = "\n".join(parts)
-
-        cleanup_old_cache()
-
-        if today_news != "NO_NEWS_LAST_24_HOURS":
-            cursor.execute(
-                "INSERT INTO daily_news_cache (date, content) VALUES (?, ?)",
-                (today, today_news)
-            )
-            conn.commit()
-
-        return final_text
 
     cursor.execute(
         "SELECT content FROM daily_news_cache WHERE date = ?",
@@ -155,19 +116,39 @@ def get_news_for_today() -> str:
     if row:
         return row[0]
 
-    today_news = get_news()
+    news_items = collect_all_news()
+    print("Parsed news:", len(news_items))
+    if not news_items:
+        text = "За последние 24 часа санкционных новостей, потенциально затрагивающих РФ, не опубликовано."
 
-    if today_news == "NO_NEWS_LAST_24_HOURS":
-        return "За последние 24 часа новых санкционных новостей не опубликовано."
+        cursor.execute(
+            "INSERT INTO daily_news_cache (date, content) VALUES (?, ?)",
+            (today, text)
+        )
+        conn.commit()
+
+        return text
+
+    formatted = "\n".join(
+        f"[{n['source']}] {n['title']} — {n['link']}"
+        for n in news_items
+    )
+
+    summary = ask_model(formatted)
 
     cursor.execute(
         "INSERT INTO daily_news_cache (date, content) VALUES (?, ?)",
-        (today, today_news)
+        (today, summary)
     )
     conn.commit()
 
-    cleanup_old_cache()
-    return today_news
+    cursor.execute("""
+        DELETE FROM daily_news_cache
+        WHERE date < date('now', '-7 days')
+    """)
+    conn.commit()
+
+    return summary
 
 
 # ================== HANDLERS ==================
@@ -215,7 +196,7 @@ async def send_news(message: types.Message):
         )
         conn.commit()
 
-        await message.answer(f"Сводка новостей:\n\n{news}")
+        await message.answer(f"Сводка санкционных новостей:\n\n{news}")
 
     except Exception as e:
         print(e)
@@ -269,6 +250,7 @@ async def main():
 
     scheduler.start()
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

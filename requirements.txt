@@ -2,3 +2,4 @@ aiogram
 requests
 python-dotenv
 apscheduler
+feedparser
