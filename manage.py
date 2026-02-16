@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pathlib import Path
 
-from sources import collect_all_news
+from sources_big import collect_all_news
 
 
 # ================== ENV ==================
