@@ -3,19 +3,39 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from urllib.parse import urljoin
+import time
+import urllib3
+urllib3.disable_warnings()
+TIME_WINDOW = timedelta(hours=28)
 
 
-TIME_WINDOW = timedelta(hours=36)
-
+SOURCE_KEYS = [
+    "EU Commission",
+    "EU Council",
+    "UK OFSI",
+    "UK FCDO",
+    "US Treasury",
+    "US State Dept",
+    "OFAC",
+    "eur-lex acts"
+]
 
 RSS_SOURCES = {
-    "EU Commission": "https://ec.europa.eu/commission/presscorner/api/rss",
-    "EU Council": "https://www.consilium.europa.eu/en/press/press-releases/rss/",
-    "UK OFSI": "https://www.gov.uk/government/organisations/office-of-financial-sanctions-implementation.atom",
-    "UK FCDO": "https://www.gov.uk/government/organisations/foreign-commonwealth-development-office.atom",
-    "US Treasury": "https://home.treasury.gov/news/press-releases/rss",
-    "US State Dept": "https://www.state.gov/press-releases/feed/",
-    "BIS": "https://www.bis.gov/feeds/news.xml"
+    "EU Commission":
+    "https://ec.europa.eu/commission/presscorner/api/rss",
+    "EU Council":
+    "https://www.consilium.europa.eu/en/press/press-releases/rss/",
+    "UK OFSI":
+    "https://www.gov.uk/government/organisations/office-of-financial-sanctions-implementation.atom",
+    "UK FCDO":
+    "https://www.gov.uk/government/organisations/foreign-commonwealth-development-office.atom",
+    "US Treasury":
+    "https://home.treasury.gov/news/press-releases/rss",
+    "US State Dept":
+    "https://www.state.gov/press-releases/feed/"
 }
 
 
@@ -91,19 +111,17 @@ def get_official_updates():
     return updates
 
 
-OFAC_URL = "https://ofac.treasury.gov/recent-actions"
-
-
-def parse_ofac_date(text):
-    try:
-        dt = datetime.strptime(text.strip(), "%B %d, %Y")
-        return dt.replace(tzinfo=timezone.utc)
-    except Exception:
-        return None
-
-
 def fetch_ofac_news():
     results = []
+    HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+
+    yesterday = datetime.now() - timedelta(days=1)
+    yesterday_str = yesterday.strftime("%d.%m.%Y")
+    start_date = yesterday.strftime("%m/%d/%Y")
+
+    OFAC_URL = f"https://ofac.treasury.gov/recent-actions?ra-start-date={start_date}"
 
     try:
         response = requests.get(OFAC_URL, headers=HEADERS, timeout=20)
@@ -124,28 +142,86 @@ def fetch_ofac_news():
 
         title = title_tag.get_text(strip=True)
         link = title_tag.get("href", "")
-
-        if not link:
-            continue
-
         if not link.startswith("http"):
             link = "https://ofac.treasury.gov" + link
-
-        published_dt = None
-        if date_tag:
-            published_dt = parse_ofac_date(date_tag.get_text())
-
-        if published_dt and not is_within_24h(published_dt):
-            continue
 
         results.append({
             "source": "OFAC",
             "title": title,
-            "date": published_dt.strftime("%d.%m.%Y") if published_dt else "",
+            "date": yesterday_str,
             "link": link
         })
 
+    # print(f"[OFAC] Found {len(results)} news items for {yesterday.strftime('%d.%m.%Y')}")
     return results
+
+
+def fetch_eurlex():
+    today = datetime.now().strftime("%d%m%Y")
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%d%m%Y")
+    yesterday_formatted = datetime.strptime(yesterday, "%d%m%Y").strftime("%d.%m.%Y")
+    options = Options()
+    options.add_argument("--headless=new")
+
+    driver = webdriver.Chrome(options=options)
+
+    url = f"https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?&ojDate={yesterday}"
+
+    driver.get(url)
+    time.sleep(2)
+
+    html = driver.page_source
+    soup = BeautifulSoup(html, "html.parser")
+
+    driver.quit()
+
+    act_links = soup.select('a[href*="legal-content"][href*="uri=OJ:L_"]')
+
+    results = []
+    for link in act_links:
+        title = link.text.strip()
+        # url = "https://eur-lex.europa.eu" + link['href']
+        full_url = urljoin("https://eur-lex.europa.eu", link['href'])
+        results.append({
+            "source": "eur-lex acts",
+            "title": title,
+            "date": yesterday_formatted,
+            "link": full_url
+        })
+
+    return results
+
+
+def fetch_bis_updates():
+    # Only titles/no extract time
+    # bis_url = "https://www.bis.doc.gov/index.php/about-bis/newsroom/press-releases"
+    return None
+
+
+def fetch_ofsi_general_licences():
+    # Not exist anymore
+    url = "https://www.gov.uk/government/collections/financial-sanctions-general-licences"
+    return None
+
+
+def fetch_uk_enforcement():
+    url = "https://www.gov.uk/government/collections/enforcement-of-financial-sanctions"
+    return None
+
+
+def fetch_uksi_sanctions():
+    url = "https://www.legislation.gov.uk/uksi"
+    return None
+
+
+def fetch_mofcom():
+    url = "http://english.mofcom.gov.cn/article/policyrelease/"
+    return None
+
+
+def fetch_ukraine_sanctions():
+    url = "https://www.president.gov.ua/documents/decrees"
+    return None
 
 
 def deduplicate(news):
@@ -165,33 +241,45 @@ def deduplicate(news):
 def log_news(news):
     titles = []
     for i in news:
-        titles.append(i['title'][:50])
+        res = f"{i['source']} --- {i['title'][:50]}"
+        titles.append(res)
     return titles
 
 
 def collect_all_news():
+
     news = []
 
     news.extend(get_official_updates())
     news.extend(fetch_ofac_news())
-
+    news.extend(fetch_eurlex())
     news = deduplicate(news)
 
-    now = datetime.now(timezone.utc)
+    # date_formats = set()
+    # for n in news:
+    #     date_str = n.get('date', '')
+    #     # date_formats.add(date_str)
+    #     if not date_str:
+    #         print(n.get('source', ''))
+    #         continue
 
-    filtered_news = []
-    for n in news:
-        date_str = n.get('date', '')
-        if not date_str:
-            continue
-        try:
-            published_dt = datetime.strptime(date_str, "%d.%m.%Y").replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        if now - published_dt <= TIME_WINDOW:
-            filtered_news.append(n)
-
-    news = filtered_news
-    print(len(news), log_news(news))
-
+    # print(date_formats)
+    # print(len(news), log_news(news))
     return news
+
+
+def test_sources():
+    pass
+    # eur_lex_test = fetch_eurlex()
+    # print("Eur Lex API: ", eur_lex_test)
+    # ofac_test = fetch_ofac_news()
+    # print("OFAC API: ", ofac_test)
+    # rss_sources = get_official_updates()
+    # print("All RSS: ", rss_sources)
+    # bis_api = fetch_bis_updates()
+    # print("Bis API:", bis_api)
+    # print("1", fetch_ofsi_general_licences())
+    # print("2", fetch_uk_enforcement())
+    # print("3", fetch_uksi_sanctions())
+    # print("4", fetch_mofcom())
+    # print("5", fetch_ukraine_sanctions())

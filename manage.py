@@ -10,7 +10,7 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pathlib import Path
-
+from sources_big import SOURCE_KEYS
 from sources_big import collect_all_news
 
 
@@ -77,7 +77,7 @@ def ask_model(materials: str) -> str:
     PROMPT = load_prompt()
 
     payload = {
-        "model": "sonar",
+        "model": "sonar-pro",
         "disable_search": True,
         "temperature": 0.1,
         "messages": [
@@ -96,11 +96,13 @@ def ask_model(materials: str) -> str:
     response.raise_for_status()
 
     result = response.json()["choices"][0]["message"]["content"].strip()
-    print(result)
+    # print(result)
     if result == "NO_NEWS_LAST_24_HOURS":
         return "За последние 24 часа санкционных новостей, потенциально затрагивающих РФ, не опубликовано."
 
-    return result
+    # return result
+    sources_str = "Проверенные источники: " + ", ".join(SOURCE_KEYS)
+    return f"{result}\n\n{sources_str}"
 
 
 # ================== BUSINESS LOGIC ==================
@@ -117,7 +119,7 @@ def get_news_for_today() -> str:
         return row[0]
 
     news_items = collect_all_news()
-    print("Parsed news:", len(news_items))
+
     if not news_items:
         text = "За последние 24 часа санкционных новостей, потенциально затрагивающих РФ, не опубликовано."
 
@@ -244,8 +246,8 @@ async def main():
     scheduler.add_job(
         send_daily_news,
         trigger="cron",
-        hour=9,
-        minute=0
+        hour=8,
+        minute=45
     )
 
     scheduler.start()
