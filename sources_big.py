@@ -3,8 +3,8 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
+# from selenium import webdriver
+# from selenium.webdriver.chrome.options import Options
 from urllib.parse import urljoin
 import time
 import urllib3
@@ -156,40 +156,40 @@ def fetch_ofac_news():
     return results
 
 
-def fetch_eurlex():
-    today = datetime.now().strftime("%d%m%Y")
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%d%m%Y")
-    yesterday_formatted = datetime.strptime(yesterday, "%d%m%Y").strftime("%d.%m.%Y")
-    options = Options()
-    options.add_argument("--headless=new")
-
-    driver = webdriver.Chrome(options=options)
-
-    url = f"https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?&ojDate={yesterday}"
-
-    driver.get(url)
-    time.sleep(2)
-
-    html = driver.page_source
-    soup = BeautifulSoup(html, "html.parser")
-
-    driver.quit()
-
-    act_links = soup.select('a[href*="legal-content"][href*="uri=OJ:L_"]')
-
-    results = []
-    for link in act_links:
-        title = link.text.strip()
-        # url = "https://eur-lex.europa.eu" + link['href']
-        full_url = urljoin("https://eur-lex.europa.eu", link['href'])
-        results.append({
-            "source": "eur-lex acts",
-            "title": title,
-            "date": yesterday_formatted,
-            "link": full_url
-        })
-
-    return results
+# def fetch_eurlex():
+#     today = datetime.now().strftime("%d%m%Y")
+#     yesterday = (datetime.now() - timedelta(days=1)).strftime("%d%m%Y")
+#     yesterday_formatted = datetime.strptime(yesterday, "%d%m%Y").strftime("%d.%m.%Y")
+#     options = Options()
+#     options.add_argument("--headless=new")
+#
+#     driver = webdriver.Chrome(options=options)
+#
+#     url = f"https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?&ojDate={yesterday}"
+#
+#     driver.get(url)
+#     time.sleep(2)
+#
+#     html = driver.page_source
+#     soup = BeautifulSoup(html, "html.parser")
+#
+#     driver.quit()
+#
+#     act_links = soup.select('a[href*="legal-content"][href*="uri=OJ:L_"]')
+#
+#     results = []
+#     for link in act_links:
+#         title = link.text.strip()
+#         # url = "https://eur-lex.europa.eu" + link['href']
+#         full_url = urljoin("https://eur-lex.europa.eu", link['href'])
+#         results.append({
+#             "source": "eur-lex acts",
+#             "title": title,
+#             "date": yesterday_formatted,
+#             "link": full_url
+#         })
+#
+#     return results
 
 
 def fetch_bis_updates():
@@ -252,7 +252,7 @@ def collect_all_news():
 
     news.extend(get_official_updates())
     news.extend(fetch_ofac_news())
-    news.extend(fetch_eurlex())
+    # news.extend(fetch_eurlex())
     news = deduplicate(news)
 
     # date_formats = set()
