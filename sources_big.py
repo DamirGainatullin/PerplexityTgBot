@@ -163,14 +163,22 @@ def selenium_test():
     from selenium.webdriver.chrome.service import Service
 
     options = Options()
+
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+
+    options.add_argument("--disable-dbus")
+
     options.binary_location = "/opt/google/chrome/chrome"
 
-    service = Service('/usr/bin/chromedriver')
-    driver = webdriver.Chrome(service=service, options=options)
+    options.add_argument("--disable-gpu")
 
+    options.add_argument("--disable-setuid-sandbox")
+
+    service = Service('/usr/bin/chromedriver')
+
+    driver = webdriver.Chrome(service=service, options=options)
     driver.get("https://example.com")
     print(driver.title)
     driver.quit()
