@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from urllib.parse import urljoin
 import time
 import urllib3
@@ -160,10 +161,21 @@ def fetch_eurlex():
     today = datetime.now().strftime("%d%m%Y")
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%d%m%Y")
     yesterday_formatted = datetime.strptime(yesterday, "%d%m%Y").strftime("%d.%m.%Y")
+
+    # Fix Selenium for VM
     options = Options()
     options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.binary_location = "/usr/bin/google-chrome"
 
-    driver = webdriver.Chrome(options=options)
+    driver = webdriver.Chrome(service=Service('/usr/bin/chromedriver'), options=options)
+
+    # For local tests
+    # options = Options()
+    # options.add_argument("--headless=new")
+    #
+    # driver = webdriver.Chrome(options=options)
 
     url = f"https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?&ojDate={yesterday}"
 
