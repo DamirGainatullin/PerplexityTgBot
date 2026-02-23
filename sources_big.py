@@ -3,8 +3,8 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-# from selenium import webdriver
-# from selenium.webdriver.chrome.options import Options
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
 from urllib.parse import urljoin
 import time
 import urllib3
@@ -20,7 +20,7 @@ SOURCE_KEYS = [
     "US Treasury",
     "US State Dept",
     "OFAC",
-    "eur-lex acts"
+    "Eur-lex acts"
 ]
 
 RSS_SOURCES = {
@@ -156,45 +156,44 @@ def fetch_ofac_news():
     return results
 
 
-# def fetch_eurlex():
-#     today = datetime.now().strftime("%d%m%Y")
-#     yesterday = (datetime.now() - timedelta(days=1)).strftime("%d%m%Y")
-#     yesterday_formatted = datetime.strptime(yesterday, "%d%m%Y").strftime("%d.%m.%Y")
-#     options = Options()
-#     options.add_argument("--headless=new")
-#
-#     driver = webdriver.Chrome(options=options)
-#
-#     url = f"https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?&ojDate={yesterday}"
-#
-#     driver.get(url)
-#     time.sleep(2)
-#
-#     html = driver.page_source
-#     soup = BeautifulSoup(html, "html.parser")
-#
-#     driver.quit()
-#
-#     act_links = soup.select('a[href*="legal-content"][href*="uri=OJ:L_"]')
-#
-#     results = []
-#     for link in act_links:
-#         title = link.text.strip()
-#         # url = "https://eur-lex.europa.eu" + link['href']
-#         full_url = urljoin("https://eur-lex.europa.eu", link['href'])
-#         results.append({
-#             "source": "eur-lex acts",
-#             "title": title,
-#             "date": yesterday_formatted,
-#             "link": full_url
-#         })
-#
-#     return results
+def fetch_eurlex():
+    today = datetime.now().strftime("%d%m%Y")
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%d%m%Y")
+    yesterday_formatted = datetime.strptime(yesterday, "%d%m%Y").strftime("%d.%m.%Y")
+    options = Options()
+    options.add_argument("--headless=new")
+
+    driver = webdriver.Chrome(options=options)
+
+    url = f"https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?&ojDate={yesterday}"
+
+    driver.get(url)
+    time.sleep(2)
+
+    html = driver.page_source
+    soup = BeautifulSoup(html, "html.parser")
+
+    driver.quit()
+
+    act_links = soup.select('a[href*="legal-content"][href*="uri=OJ:L_"]')
+
+    results = []
+    for link in act_links:
+        title = link.text.strip()
+        # url = "https://eur-lex.europa.eu" + link['href']
+        full_url = urljoin("https://eur-lex.europa.eu", link['href'])
+        results.append({
+            "source": "eur-lex acts",
+            "title": title,
+            "date": yesterday_formatted,
+            "link": full_url
+        })
+
+    return results
 
 
 def fetch_bis_updates():
-    # Only titles/no extract time
-    # bis_url = "https://www.bis.doc.gov/index.php/about-bis/newsroom/press-releases"
+    # 443 return
     return None
 
 
@@ -247,39 +246,12 @@ def log_news(news):
 
 
 def collect_all_news():
-
     news = []
-
+    news.extend(fetch_eurlex())
+    print("+ Eur-lex Acts", len(news), log_news(news))
     news.extend(get_official_updates())
+    print("+ Rss sources", len(news), log_news(news))
     news.extend(fetch_ofac_news())
-    # news.extend(fetch_eurlex())
+    print("+ OFAC", len(news), log_news(news))
     news = deduplicate(news)
-
-    # date_formats = set()
-    # for n in news:
-    #     date_str = n.get('date', '')
-    #     # date_formats.add(date_str)
-    #     if not date_str:
-    #         print(n.get('source', ''))
-    #         continue
-
-    # print(date_formats)
-    # print(len(news), log_news(news))
     return news
-
-
-def test_sources():
-    pass
-    # eur_lex_test = fetch_eurlex()
-    # print("Eur Lex API: ", eur_lex_test)
-    # ofac_test = fetch_ofac_news()
-    # print("OFAC API: ", ofac_test)
-    # rss_sources = get_official_updates()
-    # print("All RSS: ", rss_sources)
-    # bis_api = fetch_bis_updates()
-    # print("Bis API:", bis_api)
-    # print("1", fetch_ofsi_general_licences())
-    # print("2", fetch_uk_enforcement())
-    # print("3", fetch_uksi_sanctions())
-    # print("4", fetch_mofcom())
-    # print("5", fetch_ukraine_sanctions())
