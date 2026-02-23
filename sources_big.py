@@ -161,27 +161,19 @@ def selenium_test():
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.chrome.service import Service
+    from webdriver_manager.chrome import ChromeDriverManager
 
     options = Options()
-
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-
-    options.add_argument("--disable-dbus")
-
-    options.binary_location = "/opt/google/chrome/chrome"
-
+    options.add_argument("--disable-dbus")  # Критично!
     options.add_argument("--disable-gpu")
+    options.binary_location = "/opt/google/chrome/chrome"  # Явный путь
 
-    options.add_argument("--disable-setuid-sandbox")
-
-    service = Service('/usr/bin/chromedriver')
-
+    # Автоматическое управление драйвером
+    service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=options)
-    driver.get("https://example.com")
-    print(driver.title)
-    driver.quit()
 
 
 def fetch_eurlex():
