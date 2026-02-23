@@ -157,6 +157,25 @@ def fetch_ofac_news():
     return results
 
 
+def selenium_test():
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.binary_location = "/opt/google/chrome/chrome"
+
+    service = Service('/usr/bin/chromedriver')
+    driver = webdriver.Chrome(service=service, options=options)
+
+    driver.get("https://example.com")
+    print(driver.title)
+    driver.quit()
+
+
 def fetch_eurlex():
     today = datetime.now().strftime("%d%m%Y")
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%d%m%Y")
@@ -259,7 +278,8 @@ def log_news(news):
 
 def collect_all_news():
     news = []
-    news.extend(fetch_eurlex())
+    # news.extend(fetch_eurlex())
+    selenium_test()
     print("+ Eur-lex Acts", len(news), log_news(news))
     news.extend(get_official_updates())
     print("+ Rss sources", len(news), log_news(news))
