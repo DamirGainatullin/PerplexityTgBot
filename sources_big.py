@@ -167,7 +167,7 @@ def fetch_eurlex():
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.binary_location = "/usr/bin/google-chrome"
+    options.binary_location = "/opt/google/chrome/chrome"
 
     driver = webdriver.Chrome(service=Service('/usr/bin/chromedriver'), options=options)
 
