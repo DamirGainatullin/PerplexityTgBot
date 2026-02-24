@@ -1,11 +1,18 @@
 import feedparser
 import requests
-from bs4 import BeautifulSoup
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from webdriver_manager.chrome import ChromeDriverManager
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
+from datetime import datetime, timedelta
+import time
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from urllib.parse import urljoin
 import time
 import urllib3
@@ -21,7 +28,8 @@ SOURCE_KEYS = [
     "US Treasury",
     "US State Dept",
     "OFAC",
-    "Eur-lex acts"
+    "Eur-lex acts",
+    "BIS.GOV"
 ]
 
 RSS_SOURCES = {
@@ -157,89 +165,151 @@ def fetch_ofac_news():
     return results
 
 
-def selenium_test():
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.chrome.service import Service
-    from webdriver_manager.chrome import ChromeDriverManager
-
-    options = Options()
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-dbus")  # Критично!
-    options.add_argument("--disable-gpu")
-    options.binary_location = "/opt/google/chrome/chrome"  # Явный путь
-
-    # Автоматическое управление драйвером
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
-
-
 def fetch_eurlex():
-    today = datetime.now().strftime("%d%m%Y")
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%d%m%Y")
     yesterday_formatted = datetime.strptime(yesterday, "%d%m%Y").strftime("%d.%m.%Y")
+    url = f"https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?&ojDate={yesterday}"
 
-    # Fix Selenium for VM
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-dbus")
+    options.add_argument("--disable-gpu")
+
+    # For prod
     options.binary_location = "/opt/google/chrome/chrome"
 
-    driver = webdriver.Chrome(service=Service('/usr/bin/chromedriver'), options=options)
+    # For local test
+    # options.binary_location = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
-    # For local tests
-    # options = Options()
-    # options.add_argument("--headless=new")
-    #
-    # driver = webdriver.Chrome(options=options)
+    driver = None
+    try:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        driver.set_page_load_timeout(30)
+        driver.get(url)
 
-    url = f"https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?&ojDate={yesterday}"
+        wait = WebDriverWait(driver, 10)
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'a[href*="legal-content"][href*="uri=OJ:L_"]')))
 
-    driver.get(url)
-    time.sleep(2)
+        time.sleep(1)
 
-    html = driver.page_source
-    soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(driver.page_source, "html.parser")
 
-    driver.quit()
+        # Debug
+        # with open("debug_eurlex_page.html", "w", encoding="utf-8") as f:
+        #     f.write(driver.page_source)
+        # print("HTML сохранён в debug_eurlex_page.html")
 
-    act_links = soup.select('a[href*="legal-content"][href*="uri=OJ:L_"]')
+        act_links = soup.select('a[href*="legal-content"][href*="uri=OJ:L_"]')
+        # print(f"Найдено ссылок Eur-Lex: {len(act_links)}")
 
-    results = []
-    for link in act_links:
-        title = link.text.strip()
-        # url = "https://eur-lex.europa.eu" + link['href']
-        full_url = urljoin("https://eur-lex.europa.eu", link['href'])
-        results.append({
-            "source": "eur-lex acts",
-            "title": title,
-            "date": yesterday_formatted,
-            "link": full_url
-        })
+        results = []
+        for link in act_links:
+            title = link.text.strip()
+            full_url = urljoin("https://eur-lex.europa.eu", link['href'])
+            results.append({
+                "source": "eur-lex acts",
+                "title": title,
+                "date": yesterday_formatted,
+                "link": full_url
+            })
+        return results
 
-    return results
-
-
-def fetch_bis_updates():
-    # 443 return
-    return None
-
-
-def fetch_ofsi_general_licences():
-    # Not exist anymore
-    url = "https://www.gov.uk/government/collections/financial-sanctions-general-licences"
-    return None
+    except Exception as e:
+        print(f"Error fetching Eur-Lex: {e}")
+        return []
+    finally:
+        if driver:
+            driver.quit()
 
 
-def fetch_uk_enforcement():
-    url = "https://www.gov.uk/government/collections/enforcement-of-financial-sanctions"
-    return None
+def fetch_bis_news():
+    target_url = "https://www.bis.gov/news-updates"
+    yesterday = (datetime.now() - timedelta(days=1)).date()  # For tests 30 days
+
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-dbus")
+    options.add_argument("--disable-gpu")
+
+    # For prod
+    options.binary_location = "/opt/google/chrome/chrome"
+
+    # For local test
+    # options.binary_location = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+
+    driver = None
+    try:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        driver.set_page_load_timeout(30)
+        driver.get(target_url)
+        time.sleep(3)
+
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+
+        # Debug
+        # with open("debug_bis_page.html", "w", encoding="utf-8") as f:
+        #     f.write(driver.page_source)
+        # print("HTML сохранён в debug_bis_page.html")
+
+        results = []
+
+        news_items = soup.find_all('li', attrs={'data-date': True})
+
+        for item in news_items:
+            date_span = item.find('span', class_='date')
+
+            date_text = date_span.get_text(strip=True)
+            if not date_text:
+                continue
+
+            try:
+                item_date = datetime.strptime(date_text, "%B %d, %Y").date()
+            except ValueError:
+                try:
+                    item_date = datetime.strptime(date_text, "%b %d, %Y").date()
+                except ValueError:
+                    continue
+
+            if item_date < yesterday:
+                continue
+
+            link_tag = item.find('a', href=True)
+
+            if link_tag:
+                title_tag = link_tag.find('h3', class_=lambda c: c and 'font-bold' in c)
+                if title_tag:
+                    title = title_tag.get_text(strip=True)
+                else:
+                    title = link_tag.get_text(strip=True)
+
+                relative_link = link_tag.get('href')
+                if relative_link:
+                    full_link = urljoin(target_url, relative_link)
+                    formatted_date = item_date.strftime("%d.%m.%Y")
+                    results.append({
+                        "source": "BIS news",
+                        "title": title,
+                        "date": formatted_date,
+                        "link": full_link
+                    })
+        return results
+
+    except Exception as e:
+        print(f"Error fetching BIS news: {e}")
+        return []
+    finally:
+        if driver:
+            driver.quit()
 
 
 def fetch_uksi_sanctions():
+    # Not elevated news
     url = "https://www.legislation.gov.uk/uksi"
     return None
 
@@ -271,19 +341,25 @@ def deduplicate(news):
 def log_news(news):
     titles = []
     for i in news:
-        res = f"{i['source']} --- {i['title'][:50]}"
+        res = f"{i['source']} --- {i['title'][:30]}"
         titles.append(res)
     return titles
 
 
 def collect_all_news():
     news = []
-    # news.extend(fetch_eurlex())
-    selenium_test()
+
+    news.extend(fetch_bis_news())
+    print("+ BIS", len(news), log_news(news))
+    print()
+    news.extend(fetch_eurlex())
     print("+ Eur-lex Acts", len(news), log_news(news))
+    print()
     news.extend(get_official_updates())
     print("+ Rss sources", len(news), log_news(news))
+    print()
     news.extend(fetch_ofac_news())
     print("+ OFAC", len(news), log_news(news))
     news = deduplicate(news)
     return news
+
