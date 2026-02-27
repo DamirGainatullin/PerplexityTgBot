@@ -6,6 +6,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from datetime import datetime, timedelta
+from collections import Counter
 import time
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -29,7 +30,11 @@ SOURCE_KEYS = [
     "US State Dept",
     "OFAC",
     "Eur-lex acts",
-    "BIS.GOV"
+    "BIS GOV",
+    "UK Statutory Instruments",
+    "EU Sanctions FAQ",
+    "UK Russia designations",
+    "President Gov UA"
 ]
 
 RSS_SOURCES = {
@@ -44,7 +49,9 @@ RSS_SOURCES = {
     "US Treasury":
     "https://home.treasury.gov/news/press-releases/rss",
     "US State Dept":
-    "https://www.state.gov/press-releases/feed/"
+    "https://www.state.gov/press-releases/feed/",
+    "EU Sanctions FAQ":
+    "https://finance.ec.europa.eu/node/1068/rss_en"
 }
 
 
@@ -210,7 +217,7 @@ def fetch_eurlex():
             title = link.text.strip()
             full_url = urljoin("https://eur-lex.europa.eu", link['href'])
             results.append({
-                "source": "eur-lex acts",
+                "source": "Eur-lex acts",
                 "title": title,
                 "date": yesterday_formatted,
                 "link": full_url
@@ -293,7 +300,7 @@ def fetch_bis_news():
                     full_link = urljoin(target_url, relative_link)
                     formatted_date = item_date.strftime("%d.%m.%Y")
                     results.append({
-                        "source": "BIS news",
+                        "source": "BIS GOV",
                         "title": title,
                         "date": formatted_date,
                         "link": full_link
@@ -309,9 +316,174 @@ def fetch_bis_news():
 
 
 def fetch_uksi_sanctions():
-    # Not elevated news
-    url = "https://www.legislation.gov.uk/uksi"
-    return None
+    off_url = "https://www.legislation.gov.uk/uksi"
+    url = "https://www.legislation.gov.uk/title/sanctions/data.feed"
+    yesterday_formatted = (datetime.now() - timedelta(days=1)).strftime("%d.%m.%Y")
+
+    results = []
+    try:
+        feed = feedparser.parse(url)
+        for entry in feed.entries[:20]:
+            published = entry.get('published_parsed') or entry.get('updated_parsed')
+            if published:
+                pub_date = datetime(*published[:6])
+                if datetime.now() - pub_date > timedelta(days=2):
+                    continue
+
+            title = entry.get('title', '').strip()
+            link = entry.get('link', '').strip()
+
+            keywords = ['sanctions', 'financial', 'trade', 'export', 'russia',
+                        'belarus', 'iran', 'ukraine', 'asset freeze']
+            if any(kw in title.lower() for kw in keywords):
+                results.append({
+                    "source": "UK Statutory Instruments",
+                    "title": title,
+                    "date": yesterday_formatted,
+                    "link": link
+                })
+
+    except Exception as e:
+        print(f"[UKSI ATOM ERROR] {e}")
+        return []
+
+    return results[:10]
+
+
+def fetch_uk_designations_updates():
+    url = "https://www.gov.uk/guidance/russia-list-of-designations-and-sanctions-notices"
+    updates = []
+
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=20)
+        response.raise_for_status()
+    except Exception as e:
+        print(f"[UK DESIGNATIONS ERROR] {e}")
+        return updates
+
+    soup = BeautifulSoup(response.text, 'html.parser')
+
+    history_anchor = soup.find(id='full-publication-update-history')
+    if not history_anchor:
+        return updates
+
+    history_list = history_anchor.find_next('ol')
+    if not history_list:
+        return updates
+
+    notices = {}
+    notice_links = soup.select('a[href*=".pdf"]')
+    for link in notice_links:
+        notice_text = link.get_text(strip=True)
+        try:
+            notice_date_str = notice_text.split(',')[-1].strip()
+            notice_date = datetime.strptime(notice_date_str, "%d %B %Y").replace(tzinfo=timezone.utc)
+            notices[notice_date.strftime("%Y-%m-%d")] = {
+                "title": notice_text,
+                "link": "https://www.gov.uk" + link['href'] if not link['href'].startswith('http') else link['href']
+            }
+        except ValueError:
+            pass
+
+    for li in history_list.find_all('li'):
+        update_text = li.get_text(strip=True)
+        if not update_text:
+            continue
+
+        try:
+            date_parts = update_text.split()[:3]
+            date_str = ' '.join(date_parts)
+            published_dt = datetime.strptime(date_str, "%d %B %Y").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+
+        if not is_within_24h(published_dt):
+            continue
+
+        title = update_text[len(date_str):].strip()
+
+        date_key = published_dt.strftime("%Y-%m-%d")
+        link = notices.get(date_key, {}).get("link", url)
+        if link != url:
+            title = notices.get(date_key, {}).get("title", title)
+
+        updates.append({
+            "source": "UK Russia designations",
+            "title": title[:100],
+            "date": published_dt.strftime("%d.%m.%Y"),
+            "link": link
+        })
+
+    return updates
+
+
+def parse_ukrainian_date(date_str: str) -> datetime:
+    months = {
+        'січня': 1, 'лютого': 2, 'березня': 3, 'квітня': 4, 'травня': 5,
+        'червня': 6, 'липня': 7, 'серпня': 8, 'вересня': 9, 'жовтня': 10,
+        'листопада': 11, 'грудня': 12
+    }
+    try:
+        parts = date_str.split()
+        day = int(parts[0])
+        month_str = parts[1].lower()
+        year = int(parts[2])
+        month = months.get(month_str)
+        if not month:
+            raise ValueError
+        return datetime(year, month, day, tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def fetch_ukraine_president_decrees():
+    base_url = "https://www.president.gov.ua"
+    url = f"{base_url}/documents/decrees"
+    results = []
+
+    keywords = ['санкції', 'рішення рнбо', 'персональні санкції',
+                'про застосування', 'санкцій', 'ради національної безпеки і оборони']
+
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=20)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        decree_items = soup.find_all('li')  # Все <li>; фильтровать по наличию <a> с /documents/
+
+        for li in decree_items:
+            link_tag = li.find('a', href=True)
+            if not link_tag or not link_tag['href'].startswith('/documents/'):
+                continue
+
+            full_text = li.get_text(strip=True)
+            number_title = link_tag.get_text(strip=True)
+
+            text_after_link = full_text[len(number_title):].strip()
+            date_end = text_after_link.find('року') + len('року')
+            date_str = text_after_link[:date_end].strip()
+            description = text_after_link[date_end:].strip()
+
+            doc_date = parse_ukrainian_date(date_str)
+            if not doc_date or not is_within_24h(doc_date):
+                continue
+
+            title = f"{number_title} {description}"
+            title_lower = title.lower()
+            if any(keyword in title_lower for keyword in keywords):
+                full_link = urljoin(base_url, link_tag['href'])
+                results.append({
+                    "source": "President Gov UA",
+                    "title": title,
+                    "date": doc_date.strftime("%d.%m.%Y"),
+                    "link": full_link
+                })
+
+    except Exception as e:
+        print(f"[UKRAINE DECREES ERROR] {e}")
+        return []
+
+    return results
 
 
 def fetch_mofcom():
@@ -350,16 +522,30 @@ def collect_all_news():
     news = []
 
     news.extend(fetch_bis_news())
-    print("+ BIS", len(news), log_news(news))
+    print("+ BIS total:", len(news))
     print()
     news.extend(fetch_eurlex())
-    print("+ Eur-lex Acts", len(news), log_news(news))
+    print("+ Eur-lex Acts total:", len(news))
     print()
-    news.extend(get_official_updates())
-    print("+ Rss sources", len(news), log_news(news))
+    rss_news = get_official_updates()
+    news.extend(rss_news)
+
+    rss_counter = Counter(item['source'] for item in rss_news)
+    print("RSS: ...")
+    for source, count in rss_counter.items():
+        print(f"   {source}: {count}")
+
+    print("+ Rss sources total:", len(news))
     print()
     news.extend(fetch_ofac_news())
-    print("+ OFAC", len(news), log_news(news))
-    news = deduplicate(news)
-    return news
+    print("+ OFAC total:", len(news))
+    news.extend(fetch_uksi_sanctions())
+    print("+ UKSI total:", len(news))
+    news.extend(fetch_uk_designations_updates())
+    print("+ UK Russia designations total:", len(news))
+    news.extend(fetch_ukraine_president_decrees())
+    print("+ President Gov UA total:", len(news))
 
+    news = deduplicate(news)
+
+    return news

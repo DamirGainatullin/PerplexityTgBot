@@ -6,3 +6,4 @@ feedparser
 bs4
 urllib3
 selenium
+webdriver-manager
