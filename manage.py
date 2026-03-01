@@ -98,11 +98,75 @@ def ask_model(materials: str) -> str:
     result = response.json()["choices"][0]["message"]["content"].strip()
     # print(result)
     if result == "NO_NEWS_LAST_24_HOURS":
-        return "За последние 24 часа санкционных новостей, потенциально затрагивающих РФ, не опубликовано."
+        return "За последние 24 часа санкционных новостей не опубликовано."
 
     # return result
     sources_str = "Проверенные источники: " + ", ".join(SOURCE_KEYS)
     return f"{result}\n\n{sources_str}"
+
+
+_original_ask_model = ask_model
+
+
+def ask_model(materials: str) -> str:
+    url = "https://api.perplexity.ai/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    prompt = load_prompt()
+    payload = {
+        "model": "sonar-pro",
+        "disable_search": True,
+        "temperature": 0.1,
+        "messages": [
+            {
+                "role": "system",
+                "content": prompt
+            },
+            {
+                "role": "user",
+                "content": materials
+            }
+        ]
+    }
+
+    response = None
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=60)
+        status_code = response.status_code
+        response_text = (response.text or "")[:500]
+        response.raise_for_status()
+
+        result = response.json()["choices"][0]["message"]["content"].strip()
+        if result == NO_NEWS:
+            return "No sanctions news affecting Russia were found in the last 24 hours."
+
+        sources_str = "Verified sources: " + ", ".join(SOURCE_KEYS)
+        return f"{result}\n\n{sources_str}"
+    except Exception as e:
+        status_code = getattr(response, "status_code", "no-response")
+        response_text = ""
+        if response is not None:
+            response_text = (response.text or "")[:500]
+
+        print(
+            "[PERPLEXITY ERROR]",
+            f"status={status_code}",
+            f"body={response_text!r}",
+            f"error={e}"
+        )
+        return (
+            "Perplexity summary is temporarily unavailable.\n\n"
+            f"Collected news:\n{materials}"
+        )
+
+
+def _short_user_error(error: Exception) -> str:
+    message = str(error).strip()
+    if message:
+        return message
+    return "News are temporarily unavailable."
 
 
 # ================== BUSINESS LOGIC ==================
@@ -151,6 +215,26 @@ def get_news_for_today() -> str:
     conn.commit()
 
     return summary
+
+
+_original_get_news_for_today = get_news_for_today
+
+
+def get_news_for_today() -> str:
+    try:
+        return _original_get_news_for_today()
+    except requests.Timeout as e:
+        print(f"[NEWS TIMEOUT] {e}")
+        raise RuntimeError("Source or API timed out.")
+    except requests.RequestException as e:
+        print(f"[NEWS REQUEST ERROR] {e}")
+        raise RuntimeError("Network error while collecting news.")
+    except KeyError as e:
+        print(f"[NEWS FORMAT ERROR] missing key: {e}")
+        raise RuntimeError("A source returned incomplete data.")
+    except Exception as e:
+        print(f"[NEWS ERROR] {e}")
+        raise RuntimeError("Failed to prepare the news summary.")
 
 
 # ================== HANDLERS ==================
@@ -202,6 +286,8 @@ async def send_news(message: types.Message):
 
     except Exception as e:
         print(e)
+        await message.answer(_short_user_error(e))
+        return
         await message.answer("Не удалось получить новости")
 
 

@@ -1,5 +1,6 @@
 import feedparser
 import requests
+import re
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from webdriver_manager.chrome import ChromeDriverManager
@@ -185,10 +186,10 @@ def fetch_eurlex():
     options.add_argument("--disable-gpu")
 
     # For prod
-    options.binary_location = "/opt/google/chrome/chrome"
+    # options.binary_location = "/opt/google/chrome/chrome"
 
     # For local test
-    # options.binary_location = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    options.binary_location = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
     driver = None
     try:
@@ -244,10 +245,10 @@ def fetch_bis_news():
     options.add_argument("--disable-gpu")
 
     # For prod
-    options.binary_location = "/opt/google/chrome/chrome"
+    # options.binary_location = "/opt/google/chrome/chrome"
 
     # For local test
-    # options.binary_location = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    options.binary_location = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
     driver = None
     try:
@@ -488,7 +489,94 @@ def fetch_ukraine_president_decrees():
 
 def fetch_mofcom():
     url = "http://english.mofcom.gov.cn/article/policyrelease/"
-    return None
+    results = []
+
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-dbus")
+    options.add_argument("--disable-gpu")
+
+    # For prod
+    # options.binary_location = "/opt/google/chrome/chrome"
+
+    # For local test
+    options.binary_location = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+
+    def parse_mofcom_date(text):
+        patterns = [
+            (r"\b\d{4}-\d{2}-\d{2}\b", "%Y-%m-%d"),
+            (r"\b\d{4}/\d{2}/\d{2}\b", "%Y/%m/%d"),
+            (r"\b[A-Z][a-z]+ \d{1,2}, \d{4}\b", "%B %d, %Y"),
+            (r"\b[A-Z][a-z]{2} \d{1,2}, \d{4}\b", "%b %d, %Y"),
+        ]
+
+        for pattern, fmt in patterns:
+            match = re.search(pattern, text)
+            if not match:
+                continue
+            try:
+                parsed = datetime.strptime(match.group(0), fmt)
+                return parsed.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+
+        return None
+
+    driver = None
+    try:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        driver.set_page_load_timeout(30)
+        driver.get(url)
+
+        wait = WebDriverWait(driver, 10)
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, "a")))
+        time.sleep(2)
+
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        candidate_nodes = soup.select(
+            "li, tr, .list-item, .txtList li, .publishList li, .commonList li"
+        )
+
+        seen = set()
+        for node in candidate_nodes:
+            link_tag = node.find("a", href=True)
+            if not link_tag:
+                continue
+
+            href = link_tag.get("href", "").strip()
+            title = link_tag.get_text(" ", strip=True)
+            if not href or not title:
+                continue
+
+            full_link = urljoin(url, href)
+            key = (title, full_link)
+            if key in seen:
+                continue
+
+            node_text = node.get_text(" ", strip=True)
+            published_dt = parse_mofcom_date(node_text)
+            if not published_dt or not is_within_24h(published_dt):
+                continue
+
+            seen.add(key)
+            results.append({
+                "source": "MOFCOM",
+                "title": title,
+                "date": published_dt.strftime("%d.%m.%Y"),
+                "link": full_link
+            })
+
+        return results
+
+    except Exception as e:
+        print(f"[MOFCOM ERROR] {e}")
+        return []
+    finally:
+        if driver:
+            driver.quit()
 
 
 def fetch_ukraine_sanctions():
