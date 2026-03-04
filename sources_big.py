@@ -35,7 +35,7 @@ SOURCE_KEYS = [
     "UK Statutory Instruments",
     "EU Sanctions FAQ",
     "UK Russia designations",
-    "President Gov UA",
+    # "President Gov UA",
     "FederalRegister"
 ]
 
@@ -523,7 +523,7 @@ def parse_ukrainian_date(date_str: str) -> datetime:
         return None
 
 
-def fetch_ukraine_president_decrees():
+def fetch_ukraine_president_decrees():  # Bad request
     base_url = "https://www.president.gov.ua"
     url = f"{base_url}/documents/decrees"
     results = []
@@ -729,8 +729,8 @@ def collect_all_news():
     print("+ UKSI total:", len(news))
     news.extend(fetch_uk_designations_updates())
     print("+ UK Russia designations total:", len(news))
-    news.extend(fetch_ukraine_president_decrees())
-    print("+ President Gov UA total:", len(news))
+    # news.extend(fetch_ukraine_president_decrees())
+    # print("+ President Gov UA total:", len(news))
 
     news = deduplicate(news)
 
