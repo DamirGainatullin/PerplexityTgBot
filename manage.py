@@ -95,7 +95,7 @@ def prepare_summary_text(summary: str) -> str:
 
 # ================== OPENAI ==================
 def _legacy_ask_model(materials: str) -> str:
-    url = "https://api.openai.com/v1/chat/completions"
+    url = "https://api.perplexity.ai/chat/completions"
 
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -136,14 +136,15 @@ def ask_model(materials: str) -> str:
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is missing.")
 
-    url = "https://api.openai.com/v1/chat/completions"
+    url = "https://api.perplexity.ai/chat/completions"
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json"
     }
     prompt = load_prompt()
     payload = {
-        "model": "gpt-4.1-mini",
+        "model": "sonar-pro",
+        "disable_search": True,
         "temperature": 0.1,
         "max_tokens": 700,
         "messages": [
