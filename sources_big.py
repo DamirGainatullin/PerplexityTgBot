@@ -35,30 +35,73 @@ SOURCE_KEYS = [
     "UK Statutory Instruments",
     "EU Sanctions FAQ",
     "UK Russia designations",
-    "President Gov UA"
+    "President Gov UA",
+    "FederalRegister"
 ]
 
 RSS_SOURCES = {
     "EU Commission":
     "https://ec.europa.eu/commission/presscorner/api/rss",
     "EU Council":
-    "https://www.consilium.europa.eu/en/press/press-releases/rss/",
+    "https://www.consilium.europa.eu/en/rss/pressreleases.ashx",
     "UK OFSI":
     "https://www.gov.uk/government/organisations/office-of-financial-sanctions-implementation.atom",
     "UK FCDO":
     "https://www.gov.uk/government/organisations/foreign-commonwealth-development-office.atom",
     "US Treasury":
-    "https://home.treasury.gov/news/press-releases/rss",
+    "https://home.treasury.gov/news/press-releases/rss", # 404
     "US State Dept":
     "https://www.state.gov/press-releases/feed/",
     "EU Sanctions FAQ":
-    "https://finance.ec.europa.eu/node/1068/rss_en"
+    "https://finance.ec.europa.eu/node/1068/rss_en",
+    "FederalRegister":
+    "https://www.federalregister.gov/api/v1/documents.rss?conditions[search_type_id]=3&conditions[term]=entity+list+OR+export+administration+regulations"
 }
 
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 }
+
+
+HTTP_STATUS_TO_SKIP = {401, 403, 404, 503}
+
+
+def check_response_status(response, source_name):
+    if response.status_code in HTTP_STATUS_TO_SKIP:
+        print(f"[CHECK] {source_name}: HTTP {response.status_code}")
+        return False
+
+    response.raise_for_status()
+    return True
+
+
+def log_source_count(source_name, count, label, status_code=None):
+    prefix = f"[CHECK] {source_name}: "
+    if status_code is not None:
+        prefix += f"HTTP {status_code}, "
+
+    if count == 0:
+        print(f"{prefix}{label} is empty")
+    else:
+        print(f"{prefix}{label}={count}")
+
+
+def detect_html_error_page(page_text, source_name):
+    page_lower = page_text.lower()
+    error_signatures = (
+        ("401", ("401", "unauthorized")),
+        ("403", ("403", "forbidden")),
+        ("403", ("403", "access denied")),
+        ("404", ("404", "not found")),
+    )
+
+    for code, markers in error_signatures:
+        if all(marker in page_lower for marker in markers):
+            print(f"[CHECK] {source_name}: page looks like HTTP {code}")
+            return True
+
+    return False
 
 
 def is_within_24h(published_dt: datetime) -> bool:
@@ -115,7 +158,17 @@ def get_official_updates():
 
     for source_name, rss_url in RSS_SOURCES.items():
         try:
-            feed = feedparser.parse(rss_url)
+            response = requests.get(rss_url, headers=HEADERS, timeout=20, allow_redirects=True)
+
+            if not check_response_status(response, source_name):
+                continue
+
+            feed = feedparser.parse(response.content)
+            total_entries = len(feed.entries)
+            log_source_count(source_name, total_entries, "feed entries", response.status_code)
+
+            if total_entries == 0:
+                continue
 
             for entry in feed.entries[:40]:
                 normalized = normalize_entry(entry, source_name)
@@ -142,13 +195,17 @@ def fetch_ofac_news():
 
     try:
         response = requests.get(OFAC_URL, headers=HEADERS, timeout=20)
-        response.raise_for_status()
+        if not check_response_status(response, "OFAC"):
+            return results
     except Exception as e:
         print(f"[OFAC ERROR] {e}")
         return results
 
     soup = BeautifulSoup(response.text, "html.parser")
     items = soup.select(".views-row")
+    log_source_count("OFAC", len(items), "raw items", response.status_code)
+    if not items:
+        return results
 
     for item in items:
         title_tag = item.select_one("a")
@@ -197,6 +254,10 @@ def fetch_eurlex():
         driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(30)
         driver.get(url)
+        time.sleep(1)
+
+        if detect_html_error_page(f"{driver.title} {driver.page_source[:1200]}", "Eur-lex acts"):
+            return []
 
         wait = WebDriverWait(driver, 10)
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'a[href*="legal-content"][href*="uri=OJ:L_"]')))
@@ -211,6 +272,9 @@ def fetch_eurlex():
         # print("HTML сохранён в debug_eurlex_page.html")
 
         act_links = soup.select('a[href*="legal-content"][href*="uri=OJ:L_"]')
+        log_source_count("Eur-lex acts", len(act_links), "raw items")
+        if not act_links:
+            return []
         # print(f"Найдено ссылок Eur-Lex: {len(act_links)}")
 
         results = []
@@ -258,6 +322,9 @@ def fetch_bis_news():
         driver.get(target_url)
         time.sleep(3)
 
+        if detect_html_error_page(f"{driver.title} {driver.page_source[:1200]}", "BIS GOV"):
+            return []
+
         soup = BeautifulSoup(driver.page_source, "html.parser")
 
         # Debug
@@ -268,6 +335,9 @@ def fetch_bis_news():
         results = []
 
         news_items = soup.find_all('li', attrs={'data-date': True})
+        log_source_count("BIS GOV", len(news_items), "raw items")
+        if not news_items:
+            return []
 
         for item in news_items:
             date_span = item.find('span', class_='date')
@@ -323,7 +393,15 @@ def fetch_uksi_sanctions():
 
     results = []
     try:
-        feed = feedparser.parse(url)
+        response = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=True)
+        if not check_response_status(response, "UK Statutory Instruments"):
+            return []
+
+        feed = feedparser.parse(response.content)
+        log_source_count("UK Statutory Instruments", len(feed.entries), "feed entries", response.status_code)
+        if not feed.entries:
+            return []
+
         for entry in feed.entries[:20]:
             published = entry.get('published_parsed') or entry.get('updated_parsed')
             if published:
@@ -357,7 +435,8 @@ def fetch_uk_designations_updates():
 
     try:
         response = requests.get(url, headers=HEADERS, timeout=20)
-        response.raise_for_status()
+        if not check_response_status(response, "UK Russia designations"):
+            return updates
     except Exception as e:
         print(f"[UK DESIGNATIONS ERROR] {e}")
         return updates
@@ -366,10 +445,17 @@ def fetch_uk_designations_updates():
 
     history_anchor = soup.find(id='full-publication-update-history')
     if not history_anchor:
+        log_source_count("UK Russia designations", 0, "history items", response.status_code)
         return updates
 
     history_list = history_anchor.find_next('ol')
     if not history_list:
+        log_source_count("UK Russia designations", 0, "history items", response.status_code)
+        return updates
+
+    history_items = history_list.find_all('li')
+    log_source_count("UK Russia designations", len(history_items), "history items", response.status_code)
+    if not history_items:
         return updates
 
     notices = {}
@@ -386,7 +472,7 @@ def fetch_uk_designations_updates():
         except ValueError:
             pass
 
-    for li in history_list.find_all('li'):
+    for li in history_items:
         update_text = li.get_text(strip=True)
         if not update_text:
             continue
@@ -447,10 +533,15 @@ def fetch_ukraine_president_decrees():
 
     try:
         response = requests.get(url, headers=HEADERS, timeout=20)
-        response.raise_for_status()
+        if not check_response_status(response, "President Gov UA"):
+            return []
         soup = BeautifulSoup(response.text, 'html.parser')
+        decree_items = soup.find_all('li')
+        log_source_count("President Gov UA", len(decree_items), "raw items", response.status_code)
+        if not decree_items:
+            return []
 
-        decree_items = soup.find_all('li')  # Все <li>; фильтровать по наличию <a> с /documents/
+        decree_items = soup.find_all('li')
 
         for li in decree_items:
             link_tag = li.find('a', href=True)
@@ -487,6 +578,7 @@ def fetch_ukraine_president_decrees():
     return results
 
 
+# Not used  
 def fetch_mofcom():
     url = "http://english.mofcom.gov.cn/article/policyrelease/"
     results = []
@@ -535,10 +627,16 @@ def fetch_mofcom():
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "a")))
         time.sleep(2)
 
+        if detect_html_error_page(f"{driver.title} {driver.page_source[:1200]}", "MOFCOM"):
+            return []
+
         soup = BeautifulSoup(driver.page_source, "html.parser")
         candidate_nodes = soup.select(
             "li, tr, .list-item, .txtList li, .publishList li, .commonList li"
         )
+        log_source_count("MOFCOM", len(candidate_nodes), "raw items")
+        if not candidate_nodes:
+            return []
 
         seen = set()
         for node in candidate_nodes:
@@ -637,3 +735,6 @@ def collect_all_news():
     news = deduplicate(news)
 
     return news
+
+
+print(collect_all_news())

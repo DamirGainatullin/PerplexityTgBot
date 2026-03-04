@@ -18,7 +18,7 @@ from sources_big import collect_all_news
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # ================== TELEGRAM ==================
 bot = Bot(token=BOT_TOKEN)
@@ -65,20 +65,19 @@ conn.commit()
 NO_NEWS = "NO_NEWS_LAST_24_HOURS"
 
 
-# ================== PERPLEXITY ==================
-def ask_model(materials: str) -> str:
-    url = "https://api.perplexity.ai/chat/completions"
+# ================== OPENAI ==================
+def _legacy_ask_model(materials: str) -> str:
+    url = "https://api.openai.com/v1/chat/completions"
 
     headers = {
-        "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json"
     }
 
     PROMPT = load_prompt()
 
     payload = {
-        "model": "sonar-pro",
-        "disable_search": True,
+        "model": "gpt-4.1-mini",
         "temperature": 0.1,
         "messages": [
             {
@@ -105,20 +104,20 @@ def ask_model(materials: str) -> str:
     return f"{result}\n\n{sources_str}"
 
 
-_original_ask_model = ask_model
-
-
 def ask_model(materials: str) -> str:
-    url = "https://api.perplexity.ai/chat/completions"
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is missing.")
+
+    url = "https://api.openai.com/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json"
     }
     prompt = load_prompt()
     payload = {
-        "model": "sonar-pro",
-        "disable_search": True,
+        "model": "gpt-4.1-mini",
         "temperature": 0.1,
+        "max_tokens": 1200,
         "messages": [
             {
                 "role": "system",
@@ -151,13 +150,13 @@ def ask_model(materials: str) -> str:
             response_text = (response.text or "")[:500]
 
         print(
-            "[PERPLEXITY ERROR]",
+            "[OPENAI ERROR]",
             f"status={status_code}",
             f"body={response_text!r}",
             f"error={e}"
         )
         return (
-            "Perplexity summary is temporarily unavailable.\n\n"
+            "OpenAI summary is temporarily unavailable.\n\n"
             f"Collected news:\n{materials}"
         )
 

@@ -116,9 +116,16 @@ def fetch_ofac_news():
     return results
 
 
+def log_news(news):
+    titles = []
+    for i in news:
+        titles.append(i['title'][:50])
+    return titles
+
+
 def collect_all_news():
     news = []
     news.extend(get_official_updates())
     news.extend(fetch_ofac_news())
-    print(len(news), news[0])
+    print(len(news), log_news(news))
     return news
