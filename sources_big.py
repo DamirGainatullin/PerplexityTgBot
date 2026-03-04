@@ -243,10 +243,10 @@ def fetch_eurlex():
     options.add_argument("--disable-gpu")
 
     # For prod
-    # options.binary_location = "/opt/google/chrome/chrome"
+    options.binary_location = "/opt/google/chrome/chrome"
 
     # For local test
-    options.binary_location = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    # options.binary_location = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
     driver = None
     try:
@@ -309,10 +309,10 @@ def fetch_bis_news():
     options.add_argument("--disable-gpu")
 
     # For prod
-    # options.binary_location = "/opt/google/chrome/chrome"
+    options.binary_location = "/opt/google/chrome/chrome"
 
     # For local test
-    options.binary_location = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    # options.binary_location = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
     driver = None
     try:
@@ -522,8 +522,8 @@ def parse_ukrainian_date(date_str: str) -> datetime:
     except Exception:
         return None
 
-
-def fetch_ukraine_president_decrees():  # Bad request
+# Not used - Bad request
+def fetch_ukraine_president_decrees():
     base_url = "https://www.president.gov.ua"
     url = f"{base_url}/documents/decrees"
     results = []
@@ -591,10 +591,10 @@ def fetch_mofcom():
     options.add_argument("--disable-gpu")
 
     # For prod
-    # options.binary_location = "/opt/google/chrome/chrome"
+    options.binary_location = "/opt/google/chrome/chrome"
 
     # For local test
-    options.binary_location = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    # options.binary_location = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
     def parse_mofcom_date(text):
         patterns = [
@@ -736,5 +736,5 @@ def collect_all_news():
 
     return news
 
-
-print(collect_all_news())
+# Test
+# print(collect_all_news())
