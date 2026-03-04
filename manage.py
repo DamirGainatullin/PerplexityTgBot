@@ -63,6 +63,34 @@ CREATE TABLE IF NOT EXISTS daily_news_cache (
 conn.commit()
 
 NO_NEWS = "NO_NEWS_LAST_24_HOURS"
+TELEGRAM_MESSAGE_LIMIT = 4096
+SAFE_SUMMARY_LIMIT = 3500
+
+
+def truncate_text(text: str, max_length: int) -> str:
+    if len(text) <= max_length:
+        return text
+
+    cutoff = max_length - 3
+    if cutoff <= 0:
+        return text[:max_length]
+    return text[:cutoff].rstrip() + "..."
+
+
+def prepare_summary_text(summary: str) -> str:
+    prepared = summary.strip()
+    if len(prepared) > SAFE_SUMMARY_LIMIT:
+        print(
+            "[OPENAI WARN]",
+            f"summary_too_long={len(prepared)}",
+            f"truncating_to={SAFE_SUMMARY_LIMIT}"
+        )
+        prepared = truncate_text(prepared, SAFE_SUMMARY_LIMIT)
+
+    if len(prepared) > SAFE_SUMMARY_LIMIT:
+        raise RuntimeError("Prepared summary is too long for Telegram.")
+
+    return prepared
 
 
 # ================== OPENAI ==================
@@ -117,7 +145,7 @@ def ask_model(materials: str) -> str:
     payload = {
         "model": "gpt-4.1-mini",
         "temperature": 0.1,
-        "max_tokens": 1200,
+        "max_tokens": 700,
         "messages": [
             {
                 "role": "system",
@@ -137,12 +165,23 @@ def ask_model(materials: str) -> str:
         response_text = (response.text or "")[:500]
         response.raise_for_status()
 
-        result = response.json()["choices"][0]["message"]["content"].strip()
+        data = response.json()
+        usage = data.get("usage", {})
+        result = data["choices"][0]["message"]["content"].strip()
+        print(
+            "[OPENAI OK]",
+            f"status={status_code}",
+            f"input_chars={len(materials)}",
+            f"output_chars={len(result)}",
+            f"prompt_tokens={usage.get('prompt_tokens', 'n/a')}",
+            f"completion_tokens={usage.get('completion_tokens', 'n/a')}",
+            f"preview={result[:200]!r}"
+        )
         if result == NO_NEWS:
             return "No sanctions news affecting Russia were found in the last 24 hours."
 
         sources_str = "Verified sources: " + ", ".join(SOURCE_KEYS)
-        return f"{result}\n\n{sources_str}"
+        return prepare_summary_text(f"{result}\n\n{sources_str}")
     except Exception as e:
         status_code = getattr(response, "status_code", "no-response")
         response_text = ""
@@ -152,13 +191,11 @@ def ask_model(materials: str) -> str:
         print(
             "[OPENAI ERROR]",
             f"status={status_code}",
+            f"input_chars={len(materials)}",
             f"body={response_text!r}",
             f"error={e}"
         )
-        return (
-            "OpenAI summary is temporarily unavailable.\n\n"
-            f"Collected news:\n{materials}"
-        )
+        raise RuntimeError("OpenAI summary is temporarily unavailable.")
 
 
 def _short_user_error(error: Exception) -> str:
@@ -168,8 +205,20 @@ def _short_user_error(error: Exception) -> str:
     return "News are temporarily unavailable."
 
 
+def build_news_message(news: str) -> str:
+    message_text = f"РЎРІРѕРґРєР° СЃР°РЅРєС†РёРѕРЅРЅС‹С… РЅРѕРІРѕСЃС‚РµР№:\n\n{news}"
+    if len(message_text) > TELEGRAM_MESSAGE_LIMIT:
+        print(
+            "[TELEGRAM SKIP]",
+            f"message_chars={len(message_text)}",
+            f"summary_chars={len(news)}"
+        )
+        raise RuntimeError("Prepared message is too long for Telegram.")
+    return message_text
+
+
 # ================== BUSINESS LOGIC ==================
-def get_news_for_today() -> str:
+def _get_news_for_today_impl() -> str:
     today = date.today().isoformat()
 
     cursor.execute(
@@ -179,9 +228,11 @@ def get_news_for_today() -> str:
     row = cursor.fetchone()
 
     if row:
+        print("[CACHE HIT]", f"date={today}", f"chars={len(row[0])}")
         return row[0]
 
     news_items = collect_all_news()
+    print("[NEWS COLLECTED]", f"items={len(news_items)}")
 
     if not news_items:
         text = "За последние 24 часа санкционных новостей, потенциально затрагивающих РФ, не опубликовано."
@@ -199,7 +250,10 @@ def get_news_for_today() -> str:
         for n in news_items
     )
 
+    print("[NEWS INPUT]", f"chars={len(formatted)}")
     summary = ask_model(formatted)
+    summary = prepare_summary_text(summary)
+    print("[NEWS SUMMARY]", f"chars={len(summary)}", f"date={today}")
 
     cursor.execute(
         "INSERT INTO daily_news_cache (date, content) VALUES (?, ?)",
@@ -216,12 +270,9 @@ def get_news_for_today() -> str:
     return summary
 
 
-_original_get_news_for_today = get_news_for_today
-
-
 def get_news_for_today() -> str:
     try:
-        return _original_get_news_for_today()
+        return _get_news_for_today_impl()
     except requests.Timeout as e:
         print(f"[NEWS TIMEOUT] {e}")
         raise RuntimeError("Source or API timed out.")
@@ -274,12 +325,15 @@ async def send_news(message: types.Message):
 
     try:
         news = get_news_for_today()
+        message_text = build_news_message(news)
 
+        await message.answer(message_text)
         cursor.execute(
             "INSERT OR REPLACE INTO news_requests (chat_id, last_date) VALUES (?, ?)",
             (chat_id, today)
         )
         conn.commit()
+        return
 
         await message.answer(f"Сводка санкционных новостей:\n\n{news}")
 
@@ -298,6 +352,7 @@ async def send_daily_news():
 
     try:
         news = get_news_for_today()
+        message_text = build_news_message(news)
     except Exception as e:
         print("Ошибка получения новостей:", e)
         return
@@ -312,11 +367,13 @@ async def send_daily_news():
         if row and row[0] == today:
             continue
 
+        await bot.send_message(chat_id, message_text)
         cursor.execute(
             "INSERT OR REPLACE INTO news_requests (chat_id, last_date) VALUES (?, ?)",
             (chat_id, today)
         )
         conn.commit()
+        continue
 
         await bot.send_message(
             chat_id,
