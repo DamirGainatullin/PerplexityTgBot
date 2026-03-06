@@ -207,7 +207,7 @@ def _short_user_error(error: Exception) -> str:
 
 
 def build_news_message(news: str) -> str:
-    message_text = f"РЎРІРѕРґРєР° СЃР°РЅРєС†РёРѕРЅРЅС‹С… РЅРѕРІРѕСЃС‚РµР№:\n\n{news}"
+    message_text = f"Сводка санкционных новостей:\n\n{news}"
     if len(message_text) > TELEGRAM_MESSAGE_LIMIT:
         print(
             "[TELEGRAM SKIP]",
