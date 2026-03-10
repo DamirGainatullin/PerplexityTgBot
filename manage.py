@@ -2,6 +2,8 @@ import os
 import sqlite3
 import requests
 import asyncio
+import logging
+import sys
 from datetime import date
 
 from aiogram import Bot, Dispatcher, types
@@ -12,6 +14,13 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pathlib import Path
 from sources_big import SOURCE_KEYS
 from sources_big import collect_all_news
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True,
+)
 
 
 # ================== ENV ==================
@@ -80,10 +89,10 @@ def truncate_text(text: str, max_length: int) -> str:
 def prepare_summary_text(summary: str) -> str:
     prepared = summary.strip()
     if len(prepared) > SAFE_SUMMARY_LIMIT:
-        print(
-            "[OPENAI WARN]",
-            f"summary_too_long={len(prepared)}",
-            f"truncating_to={SAFE_SUMMARY_LIMIT}"
+        logging.warning(
+            "[OPENAI WARN] summary_too_long=%s truncating_to=%s",
+            len(prepared),
+            SAFE_SUMMARY_LIMIT,
         )
         prepared = truncate_text(prepared, SAFE_SUMMARY_LIMIT)
 
@@ -123,7 +132,7 @@ def _legacy_ask_model(materials: str) -> str:
     response.raise_for_status()
 
     result = response.json()["choices"][0]["message"]["content"].strip()
-    # print(result)
+    # logging.debug(result)
     if result == "NO_NEWS_LAST_24_HOURS":
         return "За последние 24 часа санкционных новостей не опубликовано."
 
@@ -169,14 +178,14 @@ def ask_model(materials: str) -> str:
         data = response.json()
         usage = data.get("usage", {})
         result = data["choices"][0]["message"]["content"].strip()
-        print(
-            "[OPENAI OK]",
-            f"status={status_code}",
-            f"input_chars={len(materials)}",
-            f"output_chars={len(result)}",
-            f"prompt_tokens={usage.get('prompt_tokens', 'n/a')}",
-            f"completion_tokens={usage.get('completion_tokens', 'n/a')}",
-            f"preview={result[:200]!r}"
+        logging.info(
+            "[OPENAI OK] status=%s input_chars=%s output_chars=%s prompt_tokens=%s completion_tokens=%s preview=%r",
+            status_code,
+            len(materials),
+            len(result),
+            usage.get("prompt_tokens", "n/a"),
+            usage.get("completion_tokens", "n/a"),
+            result[:200],
         )
         if result == NO_NEWS:
             return "No sanctions news affecting Russia were found in the last 24 hours."
@@ -189,12 +198,11 @@ def ask_model(materials: str) -> str:
         if response is not None:
             response_text = (response.text or "")[:500]
 
-        print(
-            "[OPENAI ERROR]",
-            f"status={status_code}",
-            f"input_chars={len(materials)}",
-            f"body={response_text!r}",
-            f"error={e}"
+        logging.exception(
+            "[OPENAI ERROR] status=%s input_chars=%s body=%r",
+            status_code,
+            len(materials),
+            response_text,
         )
         raise RuntimeError("OpenAI summary is temporarily unavailable.")
 
@@ -209,10 +217,10 @@ def _short_user_error(error: Exception) -> str:
 def build_news_message(news: str) -> str:
     message_text = f"Сводка санкционных новостей:\n\n{news}"
     if len(message_text) > TELEGRAM_MESSAGE_LIMIT:
-        print(
-            "[TELEGRAM SKIP]",
-            f"message_chars={len(message_text)}",
-            f"summary_chars={len(news)}"
+        logging.warning(
+            "[TELEGRAM SKIP] message_chars=%s summary_chars=%s",
+            len(message_text),
+            len(news),
         )
         raise RuntimeError("Prepared message is too long for Telegram.")
     return message_text
@@ -229,11 +237,11 @@ def _get_news_for_today_impl() -> str:
     row = cursor.fetchone()
 
     if row:
-        print("[CACHE HIT]", f"date={today}", f"chars={len(row[0])}")
+        logging.info("[CACHE HIT] date=%s chars=%s", today, len(row[0]))
         return row[0]
 
     news_items = collect_all_news()
-    print("[NEWS COLLECTED]", f"items={len(news_items)}")
+    logging.info("[NEWS COLLECTED] items=%s", len(news_items))
 
     if not news_items:
         text = "За последние 24 часа санкционных новостей, потенциально затрагивающих РФ, не опубликовано."
@@ -251,10 +259,10 @@ def _get_news_for_today_impl() -> str:
         for n in news_items
     )
 
-    print("[NEWS INPUT]", f"chars={len(formatted)}")
+    logging.info("[NEWS INPUT] chars=%s", len(formatted))
     summary = ask_model(formatted)
     summary = prepare_summary_text(summary)
-    print("[NEWS SUMMARY]", f"chars={len(summary)}", f"date={today}")
+    logging.info("[NEWS SUMMARY] chars=%s date=%s", len(summary), today)
 
     cursor.execute(
         "INSERT INTO daily_news_cache (date, content) VALUES (?, ?)",
@@ -275,16 +283,16 @@ def get_news_for_today() -> str:
     try:
         return _get_news_for_today_impl()
     except requests.Timeout as e:
-        print(f"[NEWS TIMEOUT] {e}")
+        logging.exception("[NEWS TIMEOUT] %s", e)
         raise RuntimeError("Source or API timed out.")
     except requests.RequestException as e:
-        print(f"[NEWS REQUEST ERROR] {e}")
+        logging.exception("[NEWS REQUEST ERROR] %s", e)
         raise RuntimeError("Network error while collecting news.")
     except KeyError as e:
-        print(f"[NEWS FORMAT ERROR] missing key: {e}")
+        logging.exception("[NEWS FORMAT ERROR] missing key: %s", e)
         raise RuntimeError("A source returned incomplete data.")
     except Exception as e:
-        print(f"[NEWS ERROR] {e}")
+        logging.exception("[NEWS ERROR] %s", e)
         raise RuntimeError("Failed to prepare the news summary.")
 
 
@@ -339,7 +347,7 @@ async def send_news(message: types.Message):
         await message.answer(f"Сводка санкционных новостей:\n\n{news}")
 
     except Exception as e:
-        print(e)
+        logging.exception("Failed to send news to chat_id=%s", chat_id)
         await message.answer(_short_user_error(e))
         return
         await message.answer("Не удалось получить новости")
@@ -355,7 +363,7 @@ async def send_daily_news():
         news = get_news_for_today()
         message_text = build_news_message(news)
     except Exception as e:
-        print("Ошибка получения новостей:", e)
+        logging.exception("Ошибка получения новостей")
         return
 
     for (chat_id,) in chats:

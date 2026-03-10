@@ -1,4 +1,5 @@
 import feedparser
+import logging
 import requests
 import re
 from datetime import datetime, timedelta, timezone
@@ -69,7 +70,7 @@ HTTP_STATUS_TO_SKIP = {401, 403, 404, 503}
 
 def check_response_status(response, source_name):
     if response.status_code in HTTP_STATUS_TO_SKIP:
-        print(f"[CHECK] {source_name}: HTTP {response.status_code}")
+        logging.warning("[CHECK] %s: HTTP %s", source_name, response.status_code)
         return False
 
     response.raise_for_status()
@@ -82,9 +83,9 @@ def log_source_count(source_name, count, label, status_code=None):
         prefix += f"HTTP {status_code}, "
 
     if count == 0:
-        print(f"{prefix}{label} is empty")
+        logging.warning("%s%s is empty", prefix, label)
     else:
-        print(f"{prefix}{label}={count}")
+        logging.info("%s%s=%s", prefix, label, count)
 
 
 def detect_html_error_page(page_text, source_name):
@@ -98,7 +99,7 @@ def detect_html_error_page(page_text, source_name):
 
     for code, markers in error_signatures:
         if all(marker in page_lower for marker in markers):
-            print(f"[CHECK] {source_name}: page looks like HTTP {code}")
+            logging.warning("[CHECK] %s: page looks like HTTP %s", source_name, code)
             return True
 
     return False
@@ -175,8 +176,8 @@ def get_official_updates():
                 if normalized:
                     updates.append(normalized)
 
-        except Exception as e:
-            print(f"[RSS ERROR] {source_name}: {e}")
+        except Exception:
+            logging.exception("[RSS ERROR] %s", source_name)
 
     return updates
 
@@ -197,8 +198,8 @@ def fetch_ofac_news():
         response = requests.get(OFAC_URL, headers=HEADERS, timeout=20)
         if not check_response_status(response, "OFAC"):
             return results
-    except Exception as e:
-        print(f"[OFAC ERROR] {e}")
+    except Exception:
+        logging.exception("[OFAC ERROR]")
         return results
 
     soup = BeautifulSoup(response.text, "html.parser")
@@ -226,7 +227,7 @@ def fetch_ofac_news():
             "link": link
         })
 
-    # print(f"[OFAC] Found {len(results)} news items for {yesterday.strftime('%d.%m.%Y')}")
+    # logging.info("[OFAC] Found %s news items for %s", len(results), yesterday.strftime("%d.%m.%Y"))
     return results
 
 
@@ -269,13 +270,13 @@ def fetch_eurlex():
         # Debug
         # with open("debug_eurlex_page.html", "w", encoding="utf-8") as f:
         #     f.write(driver.page_source)
-        # print("HTML сохранён в debug_eurlex_page.html")
+        # logging.info("HTML saved to debug_eurlex_page.html")
 
         act_links = soup.select('a[href*="legal-content"][href*="uri=OJ:L_"]')
         log_source_count("Eur-lex acts", len(act_links), "raw items")
         if not act_links:
             return []
-        # print(f"Найдено ссылок Eur-Lex: {len(act_links)}")
+        # logging.info("Eur-Lex links found: %s", len(act_links))
 
         results = []
         for link in act_links:
@@ -289,8 +290,8 @@ def fetch_eurlex():
             })
         return results
 
-    except Exception as e:
-        print(f"Error fetching Eur-Lex: {e}")
+    except Exception:
+        logging.exception("Error fetching Eur-Lex")
         return []
     finally:
         if driver:
@@ -330,7 +331,7 @@ def fetch_bis_news():
         # Debug
         # with open("debug_bis_page.html", "w", encoding="utf-8") as f:
         #     f.write(driver.page_source)
-        # print("HTML сохранён в debug_bis_page.html")
+        # logging.info("HTML saved to debug_bis_page.html")
 
         results = []
 
@@ -378,8 +379,8 @@ def fetch_bis_news():
                     })
         return results
 
-    except Exception as e:
-        print(f"Error fetching BIS news: {e}")
+    except Exception:
+        logging.exception("Error fetching BIS news")
         return []
     finally:
         if driver:
@@ -422,8 +423,8 @@ def fetch_uksi_sanctions():
                     "link": link
                 })
 
-    except Exception as e:
-        print(f"[UKSI ATOM ERROR] {e}")
+    except Exception:
+        logging.exception("[UKSI ATOM ERROR]")
         return []
 
     return results[:10]
@@ -437,8 +438,8 @@ def fetch_uk_designations_updates():
         response = requests.get(url, headers=HEADERS, timeout=20)
         if not check_response_status(response, "UK Russia designations"):
             return updates
-    except Exception as e:
-        print(f"[UK DESIGNATIONS ERROR] {e}")
+    except Exception:
+        logging.exception("[UK DESIGNATIONS ERROR]")
         return updates
 
     soup = BeautifulSoup(response.text, 'html.parser')
@@ -571,8 +572,8 @@ def fetch_ukraine_president_decrees():
                     "link": full_link
                 })
 
-    except Exception as e:
-        print(f"[UKRAINE DECREES ERROR] {e}")
+    except Exception:
+        logging.exception("[UKRAINE DECREES ERROR]")
         return []
 
     return results
@@ -669,8 +670,8 @@ def fetch_mofcom():
 
         return results
 
-    except Exception as e:
-        print(f"[MOFCOM ERROR] {e}")
+    except Exception:
+        logging.exception("[MOFCOM ERROR]")
         return []
     finally:
         if driver:
@@ -708,33 +709,33 @@ def collect_all_news():
     news = []
 
     news.extend(fetch_bis_news())
-    print("+ BIS total:", len(news))
-    print()
+    logging.info("+ BIS total: %s", len(news))
+    logging.info("")
     news.extend(fetch_eurlex())
-    print("+ Eur-lex Acts total:", len(news))
-    print()
+    logging.info("+ Eur-lex Acts total: %s", len(news))
+    logging.info("")
     rss_news = get_official_updates()
     news.extend(rss_news)
 
     rss_counter = Counter(item['source'] for item in rss_news)
-    print("RSS: ...")
+    logging.info("RSS: ...")
     for source, count in rss_counter.items():
-        print(f"   {source}: {count}")
+        logging.info("   %s: %s", source, count)
 
-    print("+ Rss sources total:", len(news))
-    print()
+    logging.info("+ Rss sources total: %s", len(news))
+    logging.info("")
     news.extend(fetch_ofac_news())
-    print("+ OFAC total:", len(news))
+    logging.info("+ OFAC total: %s", len(news))
     news.extend(fetch_uksi_sanctions())
-    print("+ UKSI total:", len(news))
+    logging.info("+ UKSI total: %s", len(news))
     news.extend(fetch_uk_designations_updates())
-    print("+ UK Russia designations total:", len(news))
+    logging.info("+ UK Russia designations total: %s", len(news))
     # news.extend(fetch_ukraine_president_decrees())
-    # print("+ President Gov UA total:", len(news))
+    # logging.info("+ President Gov UA total: %s", len(news))
 
     news = deduplicate(news)
 
     return news
 
 # Test
-# print(collect_all_news())
+# logging.info(collect_all_news())

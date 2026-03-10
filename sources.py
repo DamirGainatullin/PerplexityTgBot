@@ -1,4 +1,5 @@
 import feedparser
+import logging
 from datetime import datetime, timedelta, timezone
 import requests
 from bs4 import BeautifulSoup
@@ -58,8 +59,8 @@ def get_official_updates():
                 if normalized:
                     updates.append(normalized)
 
-        except Exception as e:
-            print(f"[RSS ERROR] {source_name}: {e}")
+        except Exception:
+            logging.exception("[RSS ERROR] %s", source_name)
 
 
     return updates
@@ -83,8 +84,8 @@ def fetch_ofac_news():
     try:
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
-    except Exception as e:
-        print("OFAC request error:", e)
+    except Exception:
+        logging.exception("OFAC request error")
         return []
 
     soup = BeautifulSoup(response.text, "html.parser")
@@ -127,5 +128,5 @@ def collect_all_news():
     news = []
     news.extend(get_official_updates())
     news.extend(fetch_ofac_news())
-    print(len(news), log_news(news))
+    logging.info("Collected news count=%s titles=%s", len(news), log_news(news))
     return news
