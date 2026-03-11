@@ -376,12 +376,15 @@ async def send_daily_news():
         if row and row[0] == today:
             continue
 
-        await bot.send_message(chat_id, message_text)
-        cursor.execute(
-            "INSERT OR REPLACE INTO news_requests (chat_id, last_date) VALUES (?, ?)",
-            (chat_id, today)
-        )
-        conn.commit()
+        try:
+            await bot.send_message(chat_id, message_text)
+            cursor.execute(
+                "INSERT OR REPLACE INTO news_requests (chat_id, last_date) VALUES (?, ?)",
+                (chat_id, today)
+            )
+            conn.commit()
+        except Exception:
+            logging.exception("Failed to send daily news to chat_id=%s", chat_id)
         continue
 
         await bot.send_message(

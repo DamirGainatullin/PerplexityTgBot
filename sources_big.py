@@ -28,7 +28,7 @@ SOURCE_KEYS = [
     "EU Council",
     "UK OFSI",
     "UK FCDO",
-    "US Treasury",
+    # "US Treasury",
     "US State Dept",
     "OFAC",
     "Eur-lex acts",
