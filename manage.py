@@ -8,6 +8,7 @@ from datetime import date
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandStart
+from aiogram.types import ReplyKeyboardRemove
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pathlib import Path
@@ -371,7 +372,11 @@ async def send_daily_news():
             continue
 
         try:
-            await bot.send_message(chat_id, message_text)
+            await bot.send_message(
+                chat_id,
+                message_text,
+                reply_markup=ReplyKeyboardRemove()
+            )
             cursor.execute(
                 "INSERT OR REPLACE INTO news_requests (chat_id, last_date) VALUES (?, ?)",
                 (chat_id, today)
