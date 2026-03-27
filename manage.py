@@ -7,8 +7,7 @@ import sys
 from datetime import date
 
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.filters import Command, CommandStart
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pathlib import Path
@@ -33,10 +32,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-keyboard = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="Новости")]],
-    resize_keyboard=True
-)
 # ================== PROMPT ===================
 
 
@@ -300,13 +295,12 @@ def get_news_for_today() -> str:
 @dp.message(CommandStart())
 async def start(message: types.Message):
     await message.answer(
-        "Нажми кнопку, чтобы получить сводку новостей.\n"
-        "Доступно 1 раз в день для чата.",
-        reply_markup=keyboard
+        "Используй команду /news, чтобы получить сводку новостей.\n"
+        "Доступно 1 раз в день для чата."
     )
 
 
-@dp.message(lambda m: m.text == "Новости")
+@dp.message(Command("news"))
 async def send_news(message: types.Message):
     chat_id = message.chat.id
     today = date.today().isoformat()
