@@ -14,6 +14,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pathlib import Path
 from sources_big import SOURCE_KEYS
 from sources_big import collect_all_news
+from sources_big import enrich_news_with_tavily_summary
+from sources_big import first_check_filter_news
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,9 +38,16 @@ dp = Dispatcher()
 # ================== PROMPT ===================
 
 
+def _read_text_with_fallback(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="cp1251")
+
+
 def load_prompt():
     prompt_path = Path(__file__).parent / "prompt.txt"
-    return prompt_path.read_text(encoding="utf-8")
+    return _read_text_with_fallback(prompt_path)
 
 
 # ================== DATABASE ==================
@@ -237,10 +246,10 @@ def _get_news_for_today_impl() -> str:
         return row[0]
 
     news_items = collect_all_news()
-    logging.info("[NEWS COLLECTED] items=%s", len(news_items))
+    logging.info("[NEWS COLLECTED RAW] items=%s", len(news_items))
 
     if not news_items:
-        text = "За последние 24 часа санкционных новостей, потенциально затрагивающих РФ, не опубликовано."
+        text = "No sanctions news affecting Russia were found in the last 24 hours."
 
         cursor.execute(
             "INSERT INTO daily_news_cache (date, content) VALUES (?, ?)",
@@ -250,10 +259,27 @@ def _get_news_for_today_impl() -> str:
 
         return text
 
-    formatted = "\n".join(
-        f"[{n['source']}] {n['title']} — {n['link']}"
-        for n in news_items
-    )
+    filtered_items = first_check_filter_news(news_items)
+    logging.info("[NEWS AFTER FIRST CHECK] items=%s", len(filtered_items))
+
+    if not filtered_items:
+        text = "No sanctions news affecting Russia were found in the last 24 hours."
+        cursor.execute(
+            "INSERT INTO daily_news_cache (date, content) VALUES (?, ?)",
+            (today, text)
+        )
+        conn.commit()
+        return text
+
+    enriched_items = enrich_news_with_tavily_summary(filtered_items)
+    logging.info("[NEWS AFTER ENRICH] items=%s", len(enriched_items))
+
+    formatted_parts = []
+    for n in enriched_items:
+        summary = (n.get("summary") or "").strip()
+        summary_line = f"\nSummary: {truncate_text(summary, 1000)}" if summary else ""
+        formatted_parts.append(f"[{n['source']}] {n['title']} - {n['link']}{summary_line}")
+    formatted = "\n".join(formatted_parts)
 
     logging.info("[NEWS INPUT] chars=%s", len(formatted))
     summary = ask_model(formatted)
