@@ -135,10 +135,11 @@ def dump_news_to_json(news, file_path="local_news_dump.json"):
         logging.exception("[LOCAL TEST] Failed to save JSON dump: %s", file_path)
 
 
-def dump_local_pipeline_json(parsed_raw, first_check_enriched, file_path="local_news_dump.json"):
+def dump_local_pipeline_json(parsed_raw, first_check_enriched, rewritten_summaries, file_path="local_news_dump.json"):
     payload = {
         "parsed_raw": parsed_raw,
-        "first_check_enriched": first_check_enriched
+        "first_check_enriched": first_check_enriched,
+        "summary_rewritten": rewritten_summaries,
     }
     dump_news_to_json(payload, file_path=file_path)
 
@@ -152,6 +153,11 @@ def _read_text_with_fallback(path: Path):
 
 def load_first_check_prompt():
     prompt_path = Path(__file__).parent / "first_check_prompt"
+    return _read_text_with_fallback(prompt_path)
+
+
+def load_summary_rewriter_prompt():
+    prompt_path = Path(__file__).parent / "summary_rewriter"
     return _read_text_with_fallback(prompt_path)
 
 
@@ -262,6 +268,107 @@ def first_check_filter_news(news_items):
                 time.sleep(min(2 * attempt, 6))
 
     logging.error("[FIRST CHECK ERROR] all retries failed, fallback to raw items: %r", last_error)
+    return news_items
+
+
+def rewrite_summaries_with_model(news_items):
+    api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        logging.warning("[SUMMARY REWRITER] OPENROUTER_API_KEY is missing, rewrite skipped")
+        return news_items
+
+    if not news_items:
+        return []
+
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    prompt = load_summary_rewriter_prompt()
+    materials = json.dumps(news_items, ensure_ascii=False, indent=2)
+    payload = {
+        "model": "openai/gpt-4.1-mini",
+        "temperature": 0.0,
+        "max_tokens": 9000,
+        "messages": [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": materials}
+        ]
+    }
+
+    last_error = None
+    for attempt in range(1, FIRST_CHECK_MAX_RETRIES + 1):
+        response = None
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=FIRST_CHECK_TIMEOUT)
+            response.raise_for_status()
+            data = response.json()
+            result_text = data["choices"][0]["message"]["content"]
+            parsed = _extract_json_payload(result_text)
+
+            if isinstance(parsed, dict):
+                maybe_items = parsed.get("news") or parsed.get("items") or parsed.get("data")
+                if isinstance(maybe_items, list):
+                    parsed = maybe_items
+
+            if not isinstance(parsed, list):
+                raise ValueError("summary_rewriter response is not a JSON list.")
+
+            rewritten = []
+            by_key = {}
+            for item in news_items:
+                if not isinstance(item, dict):
+                    continue
+                key = (
+                    str(item.get("source", "")).strip(),
+                    str(item.get("title", "")).strip(),
+                    str(item.get("link", "")).strip(),
+                    str(item.get("date", "")).strip(),
+                )
+                by_key[key] = item
+
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                normalized = _normalize_news_item(item)
+                key = (
+                    normalized["source"],
+                    normalized["title"],
+                    normalized["link"],
+                    normalized["date"],
+                )
+                original = by_key.get(key)
+                if not original:
+                    continue
+                new_item = dict(original)
+                new_summary = str(item.get("summary", "")).strip()
+                if new_summary:
+                    new_item["summary"] = new_summary[:2000]
+                rewritten.append(new_item)
+
+            if not rewritten:
+                raise ValueError("summary_rewriter returned no matched items.")
+
+            logging.info("[SUMMARY REWRITER] input_items=%s output_items=%s", len(news_items), len(rewritten))
+            return rewritten
+        except Exception as exc:
+            last_error = exc
+            status_code = getattr(response, "status_code", "no-response")
+            response_text = (response.text or "")[:500] if response is not None else ""
+            logging.warning(
+                "[SUMMARY REWRITER RETRY] attempt=%s/%s status=%s input_items=%s body=%r err=%s",
+                attempt,
+                FIRST_CHECK_MAX_RETRIES,
+                status_code,
+                len(news_items),
+                response_text,
+                exc,
+            )
+            if attempt < FIRST_CHECK_MAX_RETRIES:
+                time.sleep(min(2 * attempt, 6))
+
+    logging.error("[SUMMARY REWRITER ERROR] all retries failed, fallback to enriched summaries: %r", last_error)
     return news_items
 
 
@@ -982,11 +1089,14 @@ def build_missing_summary_links(news):
     for item in news:
         source = item.get("source")
         link = (item.get("link") or "").strip()
+        summary = clean_summary_text(item.get("summary", ""))
 
         if not source or not link:
             continue
         # Skip RSS sources because they already provide useful summaries.
         if source in RSS_SOURCES:
+            continue
+        if summary and not is_low_quality_summary(summary):
             continue
 
         if source not in links_by_source:
@@ -1103,6 +1213,127 @@ def build_extract_candidates(item):
             seen.add(c)
             unique.append(c)
     return unique
+
+
+def extract_ofac_direct_summary(link):
+    try:
+        response = requests.get(link, headers=HEADERS, timeout=30, allow_redirects=True)
+        response.raise_for_status()
+    except Exception:
+        logging.exception("[OFAC DIRECT] failed to load recent action page: %s", link)
+        return ""
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    article = soup.select_one("article")
+    if not article:
+        return ""
+
+    parts = []
+    for p in article.select(".field__item p, p"):
+        text = clean_summary_text(p.get_text(" ", strip=True))
+        if len(text) > 40:
+            parts.append(text)
+
+    # Use treasury press-release page when available for more context.
+    press_link = article.select_one(".field--name-field-press-release-link a[href]")
+    if press_link:
+        press_url = urljoin(link, (press_link.get("href") or "").strip())
+        if press_url:
+            try:
+                pr = requests.get(press_url, headers=HEADERS, timeout=30, allow_redirects=True)
+                pr.raise_for_status()
+                pr_soup = BeautifulSoup(pr.text, "html.parser")
+                region = pr_soup.select_one(".region-content")
+                if region:
+                    for p in region.select("p"):
+                        text = clean_summary_text(p.get_text(" ", strip=True))
+                        if len(text) > 60 and "Role of the Treasury" not in text:
+                            parts.append(text)
+            except Exception:
+                logging.exception("[OFAC DIRECT] failed to load press release page: %s", press_url)
+
+    seen = set()
+    unique_parts = []
+    for part in parts:
+        if part in seen:
+            continue
+        seen.add(part)
+        unique_parts.append(part)
+
+    return clean_summary_text(" ".join(unique_parts))[:2500]
+
+
+def extract_eurlex_direct_summary(link):
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-dbus")
+    options.add_argument("--disable-gpu")
+    options.binary_location = get_chrome_binary_location()
+
+    driver = None
+    html = ""
+    try:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        driver.set_page_load_timeout(45)
+
+        candidate_urls = [
+            link,
+            link.replace("/TXT/?uri=", "/TXT/HTML/?uri="),
+            link.replace("/TXT/?uri=", "/TXT/PDF/?uri="),
+        ]
+        for candidate in candidate_urls:
+            driver.get(candidate)
+            try:
+                WebDriverWait(driver, 12).until(
+                    EC.any_of(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "#document1")),
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "#text")),
+                    )
+                )
+            except Exception:
+                pass
+
+            html = driver.page_source
+            soup_try = BeautifulSoup(html, "html.parser")
+            if soup_try.select_one("#document1") or soup_try.select_one("#text"):
+                break
+    except Exception:
+        logging.exception("[EURLex DIRECT] failed to load page: %s", link)
+        return ""
+    finally:
+        if driver:
+            driver.quit()
+
+    if not html:
+        return ""
+
+    soup = BeautifulSoup(html, "html.parser")
+    main_node = soup.select_one("#document1") or soup.select_one("#text")
+    if not main_node:
+        return ""
+
+    text = clean_summary_text(main_node.get_text(" ", strip=True))
+    text = re.sub(r"An official website of the European Union.*?Accept all cookies", " ", text, flags=re.I)
+    text = re.sub(r"Image\s*\d+\s*:?", " ", text, flags=re.I)
+    text = re.sub(r"L_\d+[A-Z]{2}\.\d+\d*\.fmx\.xml", " ", text, flags=re.I)
+    text = clean_summary_text(text)
+    return text[:3000]
+
+
+def extract_source_specific_summary(item):
+    source = (item.get("source") or "").strip()
+    link = (item.get("link") or "").strip()
+    if not link:
+        return ""
+
+    if source == "OFAC":
+        return extract_ofac_direct_summary(link)
+    if source == "Eur-lex acts":
+        return extract_eurlex_direct_summary(link)
+    return ""
 
 
 def load_live_sources_config(path="live_sources"):
@@ -1351,6 +1582,24 @@ def enrich_news_with_tavily_summary(news):
         logging.warning("[TAVILY] TAVILY_API_KEY is empty, enrichment skipped")
         return news
 
+    # First pass: source-specific extraction for problematic structures.
+    source_specific_updates = 0
+    for item in news:
+        source = item.get("source")
+        if source in RSS_SOURCES:
+            continue
+        current = clean_summary_text(item.get("summary", ""))
+        if current and not is_low_quality_summary(current):
+            continue
+
+        direct = clean_summary_text(extract_source_specific_summary(item))
+        if direct and not is_low_quality_summary(direct):
+            item["summary"] = direct
+            source_specific_updates += 1
+
+    if source_specific_updates:
+        logging.info("[DIRECT EXTRACT] source-specific summaries updated=%s", source_specific_updates)
+
     links_by_source = build_missing_summary_links(news)
     if not links_by_source:
         logging.info("[TAVILY] No missing summaries, enrichment skipped")
@@ -1513,10 +1762,12 @@ if __name__ == "__main__":
     parsed_raw = collect_all_news()
     first_checked = first_check_filter_news(parsed_raw)
     first_check_enriched = enrich_news_with_tavily_summary(first_checked)
-    dump_local_pipeline_json(parsed_raw, first_check_enriched)
+    summary_rewritten = rewrite_summaries_with_model(first_check_enriched)
+    dump_local_pipeline_json(parsed_raw, first_check_enriched, summary_rewritten)
     logging.info("[LOCAL TEST] raw total: %s", len(parsed_raw))
     logging.info("[LOCAL TEST] first_check total: %s", len(first_checked))
     logging.info("[LOCAL TEST] first_check_enriched with summary: %s", sum(1 for i in first_check_enriched if (i.get("summary") or "").strip()))
+    logging.info("[LOCAL TEST] summary_rewritten with summary: %s", sum(1 for i in summary_rewritten if (i.get("summary") or "").strip()))
 
 
 # python sources_big.py *> local_test_run.log

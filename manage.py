@@ -16,6 +16,7 @@ from sources_big import SOURCE_KEYS
 from sources_big import collect_all_news
 from sources_big import enrich_news_with_tavily_summary
 from sources_big import first_check_filter_news
+from sources_big import rewrite_summaries_with_model
 
 logging.basicConfig(
     level=logging.INFO,
@@ -273,9 +274,11 @@ def _get_news_for_today_impl() -> str:
 
     enriched_items = enrich_news_with_tavily_summary(filtered_items)
     logging.info("[NEWS AFTER ENRICH] items=%s", len(enriched_items))
+    rewritten_items = rewrite_summaries_with_model(enriched_items)
+    logging.info("[NEWS AFTER SUMMARY REWRITE] items=%s", len(rewritten_items))
 
     formatted_parts = []
-    for n in enriched_items:
+    for n in rewritten_items:
         summary = (n.get("summary") or "").strip()
         summary_line = f"\nSummary: {truncate_text(summary, 1000)}" if summary else ""
         formatted_parts.append(f"[{n['source']}] {n['title']} - {n['link']}{summary_line}")
