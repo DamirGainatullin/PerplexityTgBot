@@ -1,4 +1,5 @@
 import feedparser
+import argparse
 import logging
 import requests
 import re
@@ -35,6 +36,8 @@ DEFAULT_LOCAL_CHROME_BINARY = r"C:\Program Files\Google\Chrome\Application\chrom
 FIRST_CHECK_TIMEOUT = 120
 FIRST_CHECK_MAX_RETRIES = 3
 US_TREASURY_CANDIDATE_URL = "https://home.treasury.gov/news/press-releases/"
+NO_NEWS = "NO_NEWS_LAST_24_HOURS"
+SAFE_SUMMARY_LIMIT = 3500
 
 
 RUNTIME_CONFIG = {
@@ -159,6 +162,113 @@ def load_first_check_prompt():
 def load_summary_rewriter_prompt():
     prompt_path = Path(__file__).parent / "summary_rewriter"
     return _read_text_with_fallback(prompt_path)
+
+
+def load_final_prompt():
+    prompt_path = Path(__file__).parent / "prompt.txt"
+    return _read_text_with_fallback(prompt_path)
+
+
+def truncate_text(text, max_length):
+    if len(text) <= max_length:
+        return text
+
+    cutoff = max_length - 3
+    if cutoff <= 0:
+        return text[:max_length]
+    return text[:cutoff].rstrip() + "..."
+
+
+def prepare_summary_text(summary):
+    prepared = (summary or "").strip()
+    if len(prepared) > SAFE_SUMMARY_LIMIT:
+        logging.warning(
+            "[OPENAI WARN] summary_too_long=%s truncating_to=%s",
+            len(prepared),
+            SAFE_SUMMARY_LIMIT,
+        )
+        prepared = truncate_text(prepared, SAFE_SUMMARY_LIMIT)
+
+    if len(prepared) > SAFE_SUMMARY_LIMIT:
+        raise RuntimeError("Prepared summary is too long for Telegram.")
+
+    return prepared
+
+
+def build_final_summary_materials(news_items):
+    formatted_parts = []
+    for item in news_items:
+        summary = (item.get("summary") or "").strip()
+        summary_line = f"\nSummary: {truncate_text(summary, 1000)}" if summary else ""
+        formatted_parts.append(f"[{item['source']}] {item['title']} - {item['link']}{summary_line}")
+    return "\n".join(formatted_parts)
+
+
+def ask_final_summary_model(materials):
+    api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY is missing.")
+
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    prompt = load_final_prompt()
+    payload = {
+        "model": "openai/gpt-4.1-mini",
+        "temperature": 0.1,
+        "max_tokens": 700,
+        "messages": [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": materials}
+        ]
+    }
+
+    response = None
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=60)
+        status_code = response.status_code
+        response.raise_for_status()
+
+        data = response.json()
+        usage = data.get("usage", {})
+        result = data["choices"][0]["message"]["content"].strip()
+        logging.info(
+            "[OPENAI FINAL OK] status=%s input_chars=%s output_chars=%s prompt_tokens=%s completion_tokens=%s preview=%r",
+            status_code,
+            len(materials),
+            len(result),
+            usage.get("prompt_tokens", "n/a"),
+            usage.get("completion_tokens", "n/a"),
+            result[:200],
+        )
+        if result == NO_NEWS:
+            return "No sanctions news affecting Russia were found in the last 24 hours."
+
+        sources_str = "Verified sources: " + ", ".join(SOURCE_KEYS)
+        return prepare_summary_text(f"{result}\n\n{sources_str}")
+    except Exception:
+        status_code = getattr(response, "status_code", "no-response")
+        response_text = ""
+        if response is not None:
+            response_text = (response.text or "")[:500]
+        logging.exception(
+            "[OPENAI FINAL ERROR] status=%s input_chars=%s body=%r",
+            status_code,
+            len(materials),
+            response_text,
+        )
+        raise RuntimeError("OpenAI summary is temporarily unavailable.")
+
+
+def dump_text_to_file(text, file_path):
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(text)
+        logging.info("[LOCAL TEST] Text dump saved: %s", file_path)
+    except Exception:
+        logging.exception("[LOCAL TEST] Failed to save text dump: %s", file_path)
 
 
 def _extract_json_payload(text):
@@ -1756,19 +1866,75 @@ def collect_all_news():
     return news
 
 
-if __name__ == "__main__":
+def run_local_parsing_pipeline(json_dump_path="local_news_dump.json"):
     # Local run helper: does not affect imports/calls from manage.py
     enable_local_test_mode(log_to_file=False)
     parsed_raw = collect_all_news()
     first_checked = first_check_filter_news(parsed_raw)
     first_check_enriched = enrich_news_with_tavily_summary(first_checked)
     summary_rewritten = rewrite_summaries_with_model(first_check_enriched)
-    dump_local_pipeline_json(parsed_raw, first_check_enriched, summary_rewritten)
+    dump_local_pipeline_json(parsed_raw, first_check_enriched, summary_rewritten, file_path=json_dump_path)
     logging.info("[LOCAL TEST] raw total: %s", len(parsed_raw))
     logging.info("[LOCAL TEST] first_check total: %s", len(first_checked))
     logging.info("[LOCAL TEST] first_check_enriched with summary: %s", sum(1 for i in first_check_enriched if (i.get("summary") or "").strip()))
     logging.info("[LOCAL TEST] summary_rewritten with summary: %s", sum(1 for i in summary_rewritten if (i.get("summary") or "").strip()))
+    return {
+        "parsed_raw": parsed_raw,
+        "first_checked": first_checked,
+        "first_check_enriched": first_check_enriched,
+        "summary_rewritten": summary_rewritten,
+    }
 
 
-# python sources_big.py *> local_test_run.log
-# TODO add another layer off request to openrouter gpt for rewrite summarize for final svodka
+def run_local_prompt_summary_test(json_dump_path="local_news_dump.json", prompt_input_path="local_prompt_input.txt", summary_output_path="local_summary_output.txt"):
+    pipeline = run_local_parsing_pipeline(json_dump_path=json_dump_path)
+    rewritten_items = pipeline["summary_rewritten"]
+
+    if not rewritten_items:
+        summary = "No sanctions news affecting Russia were found in the last 24 hours."
+        dump_text_to_file("", prompt_input_path)
+        dump_text_to_file(summary, summary_output_path)
+        logging.info("[LOCAL PROMPT TEST] rewritten_items=0, summary generated from no-news fallback")
+        print(summary)
+        return summary
+
+    formatted = build_final_summary_materials(rewritten_items)
+    dump_text_to_file(formatted, prompt_input_path)
+    logging.info("[LOCAL PROMPT TEST] prompt_input_chars=%s", len(formatted))
+
+    summary = ask_final_summary_model(formatted)
+    summary = prepare_summary_text(summary)
+    dump_text_to_file(summary, summary_output_path)
+    logging.info("[LOCAL PROMPT TEST] summary_chars=%s", len(summary))
+    print(summary)
+    return summary
+
+
+def parse_cli_args():
+    parser = argparse.ArgumentParser(description="Local tools for sanctions pipeline tests without Telegram.")
+    parser.add_argument(
+        "--mode",
+        choices=["pipeline", "prompt-summary"],
+        default="pipeline",
+        help="pipeline: current local parsing test; prompt-summary: full pipeline + final prompt summary",
+    )
+    parser.add_argument("--json-dump-path", default="local_news_dump.json", help="Path to JSON dump output")
+    parser.add_argument("--prompt-input-path", default="local_prompt_input.txt", help="Path to saved prompt input text")
+    parser.add_argument("--summary-output-path", default="local_summary_output.txt", help="Path to saved final summary text")
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_cli_args()
+    if args.mode == "prompt-summary":
+        run_local_prompt_summary_test(
+            json_dump_path=args.json_dump_path,
+            prompt_input_path=args.prompt_input_path,
+            summary_output_path=args.summary_output_path,
+        )
+    else:
+        run_local_parsing_pipeline(json_dump_path=args.json_dump_path)
+
+
+# python sources_big.py *> local_test_run.log --- parser
+# python sources_big.py --mode prompt-summary *> local_prompt_summary_test.log --- full pipeline
