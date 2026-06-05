@@ -5,8 +5,10 @@ import asyncio
 import logging
 import sys
 from datetime import date
+from urllib.parse import urlsplit, urlunsplit
 
 from aiogram import Bot, Dispatcher, types
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command, CommandStart
 from aiogram.types import ReplyKeyboardRemove
 from dotenv import load_dotenv
@@ -31,9 +33,28 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
+TELEGRAM_PROXY_URL = os.getenv("TELEGRAM_PROXY_URL", "").strip()
 
 # ================== TELEGRAM ==================
-bot = Bot(token=BOT_TOKEN)
+
+
+def _mask_proxy_url(proxy_url: str) -> str:
+    parts = urlsplit(proxy_url)
+    if not parts.netloc or "@" not in parts.netloc:
+        return proxy_url
+
+    _, host_part = parts.netloc.rsplit("@", 1)
+    return urlunsplit((parts.scheme, f"***@{host_part}", parts.path, parts.query, parts.fragment))
+
+
+def build_telegram_bot() -> Bot:
+    if TELEGRAM_PROXY_URL:
+        logging.info("[TELEGRAM] proxy enabled: %s", _mask_proxy_url(TELEGRAM_PROXY_URL))
+        return Bot(token=BOT_TOKEN, session=AiohttpSession(proxy=TELEGRAM_PROXY_URL))
+    return Bot(token=BOT_TOKEN)
+
+
+bot = build_telegram_bot()
 dp = Dispatcher()
 
 # ================== PROMPT ===================
