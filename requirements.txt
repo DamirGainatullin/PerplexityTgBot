@@ -1,6 +1,7 @@
 aiogram
 aiohttp-socks
 requests
+PySocks
 python-dotenv
 apscheduler
 feedparser

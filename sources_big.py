@@ -24,7 +24,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from urllib.parse import urljoin
 import time
 import urllib3
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 urllib3.disable_warnings()
 TIME_WINDOW = timedelta(hours=28)
 TAVILY_EXTRACT_URL = "https://api.tavily.com/extract"
@@ -38,6 +38,7 @@ FIRST_CHECK_MAX_RETRIES = 3
 US_TREASURY_CANDIDATE_URL = "https://home.treasury.gov/news/press-releases/"
 NO_NEWS = "NO_NEWS_LAST_24_HOURS"
 SAFE_SUMMARY_LIMIT = 3500
+_OPENROUTER_PROXY_LOGGED = False
 
 
 RUNTIME_CONFIG = {
@@ -100,6 +101,40 @@ HEADERS = {
 
 
 HTTP_STATUS_TO_SKIP = {401, 403, 404, 503}
+
+
+def _mask_proxy_url(proxy_url):
+    parts = urlsplit(proxy_url)
+    if not parts.netloc or "@" not in parts.netloc:
+        return proxy_url
+
+    _, host_part = parts.netloc.rsplit("@", 1)
+    return urlunsplit((parts.scheme, f"***@{host_part}", parts.path, parts.query, parts.fragment))
+
+
+def _normalize_requests_proxy_url(proxy_url):
+    if proxy_url.startswith("socks5://"):
+        return "socks5h://" + proxy_url[len("socks5://"):]
+    return proxy_url
+
+
+def get_openrouter_request_kwargs(timeout):
+    kwargs = {"timeout": timeout}
+    proxy_url = os.getenv("OPENROUTER_PROXY_URL", "").strip()
+    if not proxy_url:
+        return kwargs
+
+    global _OPENROUTER_PROXY_LOGGED
+    normalized_proxy_url = _normalize_requests_proxy_url(proxy_url)
+    if not _OPENROUTER_PROXY_LOGGED:
+        logging.info("[OPENROUTER] proxy enabled: %s", _mask_proxy_url(normalized_proxy_url))
+        _OPENROUTER_PROXY_LOGGED = True
+
+    kwargs["proxies"] = {
+        "http": normalized_proxy_url,
+        "https": normalized_proxy_url,
+    }
+    return kwargs
 
 
 def enable_local_test_mode(log_to_file=False, log_file_path="sources_big.local.log", log_level=logging.INFO, local_chrome_binary=DEFAULT_LOCAL_CHROME_BINARY):
@@ -227,7 +262,12 @@ def ask_final_summary_model(materials):
 
     response = None
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=60)
+        response = requests.post(
+            url,
+            json=payload,
+            headers=headers,
+            **get_openrouter_request_kwargs(timeout=60),
+        )
         status_code = response.status_code
         response.raise_for_status()
 
@@ -337,7 +377,12 @@ def first_check_filter_news(news_items):
     for attempt in range(1, FIRST_CHECK_MAX_RETRIES + 1):
         response = None
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=FIRST_CHECK_TIMEOUT)
+            response = requests.post(
+                url,
+                json=payload,
+                headers=headers,
+                **get_openrouter_request_kwargs(timeout=FIRST_CHECK_TIMEOUT),
+            )
             response.raise_for_status()
             data = response.json()
             result_text = data["choices"][0]["message"]["content"]
@@ -411,7 +456,12 @@ def rewrite_summaries_with_model(news_items):
     for attempt in range(1, FIRST_CHECK_MAX_RETRIES + 1):
         response = None
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=FIRST_CHECK_TIMEOUT)
+            response = requests.post(
+                url,
+                json=payload,
+                headers=headers,
+                **get_openrouter_request_kwargs(timeout=FIRST_CHECK_TIMEOUT),
+            )
             response.raise_for_status()
             data = response.json()
             result_text = data["choices"][0]["message"]["content"]

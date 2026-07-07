@@ -18,6 +18,7 @@ from sources_big import SOURCE_KEYS
 from sources_big import collect_all_news
 from sources_big import enrich_news_with_tavily_summary
 from sources_big import first_check_filter_news
+from sources_big import get_openrouter_request_kwargs
 from sources_big import rewrite_summaries_with_model
 
 logging.basicConfig(
@@ -156,7 +157,12 @@ def _legacy_ask_model(materials: str) -> str:
         ]
     }
 
-    response = requests.post(url, json=payload, headers=headers, timeout=60)
+    response = requests.post(
+        url,
+        json=payload,
+        headers=headers,
+        **get_openrouter_request_kwargs(timeout=60),
+    )
     response.raise_for_status()
 
     result = response.json()["choices"][0]["message"]["content"].strip()
@@ -197,7 +203,12 @@ def ask_model(materials: str) -> str:
 
     response = None
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=60)
+        response = requests.post(
+            url,
+            json=payload,
+            headers=headers,
+            **get_openrouter_request_kwargs(timeout=60),
+        )
         status_code = response.status_code
         response_text = (response.text or "")[:500]
         response.raise_for_status()
