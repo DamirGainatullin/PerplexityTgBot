@@ -43,7 +43,8 @@ _OPENROUTER_PROXY_LOGGED = False
 
 RUNTIME_CONFIG = {
     "local_test_mode": False,
-    "chrome_binary_location": DEFAULT_SERVER_CHROME_BINARY
+    "chrome_binary_location": DEFAULT_SERVER_CHROME_BINARY,
+    "chromedriver_path": "",
 }
 
 
@@ -162,6 +163,24 @@ def enable_local_test_mode(log_to_file=False, log_file_path="sources_big.local.l
 
 def get_chrome_binary_location():
     return RUNTIME_CONFIG["chrome_binary_location"]
+
+
+def get_chromedriver_path():
+    configured = RUNTIME_CONFIG.get("chromedriver_path", "").strip()
+    if configured:
+        return configured
+    return os.getenv("CHROMEDRIVER_PATH", "").strip()
+
+
+def build_chromedriver_service():
+    chromedriver_path = get_chromedriver_path()
+    if chromedriver_path:
+        if os.path.exists(chromedriver_path):
+            logging.info("[CHROMEDRIVER] using configured path: %s", chromedriver_path)
+            return Service(chromedriver_path)
+        logging.warning("[CHROMEDRIVER] configured path not found, fallback to webdriver-manager: %s", chromedriver_path)
+
+    return Service(ChromeDriverManager().install())
 
 
 def dump_news_to_json(news, file_path="local_news_dump.json"):
@@ -794,7 +813,7 @@ def fetch_eurlex():
 
     driver = None
     try:
-        service = Service(ChromeDriverManager().install())
+        service = build_chromedriver_service()
         driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(30)
         driver.get(url)
@@ -857,7 +876,7 @@ def fetch_bis_news():
 
     driver = None
     try:
-        service = Service(ChromeDriverManager().install())
+        service = build_chromedriver_service()
         driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(30)
         driver.get(target_url)
@@ -1156,7 +1175,7 @@ def fetch_mofcom():
 
     driver = None
     try:
-        service = Service(ChromeDriverManager().install())
+        service = build_chromedriver_service()
         driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(30)
         driver.get(url)
@@ -1435,7 +1454,7 @@ def extract_eurlex_direct_summary(link):
     driver = None
     html = ""
     try:
-        service = Service(ChromeDriverManager().install())
+        service = build_chromedriver_service()
         driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(45)
 
