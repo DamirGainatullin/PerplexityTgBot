@@ -9,3 +9,6 @@ bs4
 urllib3
 selenium
 webdriver-manager
+trafilatura==2.3.0
+lxml_html_clean==0.4.5
+pypdf==6.19.0

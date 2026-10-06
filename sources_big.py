@@ -1,3 +1,4 @@
+from model_client import MODEL, MAX_OUTPUT_TOKENS, post_completion
 import feedparser
 import argparse
 import logging
@@ -36,8 +37,8 @@ DEFAULT_LOCAL_CHROME_BINARY = r"C:\Program Files\Google\Chrome\Application\chrom
 FIRST_CHECK_TIMEOUT = 120
 FIRST_CHECK_MAX_RETRIES = 3
 US_TREASURY_CANDIDATE_URL = "https://home.treasury.gov/news/press-releases/"
+UKSI_FEED_URL = "https://www.legislation.gov.uk/new/uksi/data.feed"
 NO_NEWS = "NO_NEWS_LAST_24_HOURS"
-SAFE_SUMMARY_LIMIT = 3500
 _OPENROUTER_PROXY_LOGGED = False
 
 
@@ -49,10 +50,11 @@ RUNTIME_CONFIG = {
 
 
 SOURCE_LINK_HINTS = {
+    "US Treasury": "home.treasury.gov/news/press-releases",
     "OFAC": "ofac.treasury.gov/recent-actions",
     "Eur-lex acts": "eur-lex.europa.eu/oj/daily-view",
     "BIS GOV": "www.bis.gov/news-updates",
-    "UK Statutory Instruments": "www.legislation.gov.uk/title/sanctions/data.feed",
+    "UK Statutory Instruments": "www.legislation.gov.uk/new/uksi/data.feed",
     "UK Russia designations": "www.gov.uk/guidance/russia-list-of-designations-and-sanctions-notices",
     "President Gov UA": "www.president.gov.ua/documents/decrees",
     "MOFCOM": "english.mofcom.gov.cn/article/policyrelease/",
@@ -85,10 +87,8 @@ RSS_SOURCES = {
     "https://www.gov.uk/government/organisations/office-of-financial-sanctions-implementation.atom",
     "UK FCDO":
     "https://www.gov.uk/government/organisations/foreign-commonwealth-development-office.atom",
-    "US Treasury":
-    "https://home.treasury.gov/news/press-releases/rss", # 404
     "US State Dept":
-    "https://www.state.gov/press-releases/feed/",
+    "https://www.state.gov/rss-feed/press-releases/feed/",
     "EU Sanctions FAQ":
     "https://finance.ec.europa.eu/node/1068/rss_en",
     "FederalRegister":
@@ -209,7 +209,7 @@ def _read_text_with_fallback(path: Path):
 
 
 def load_first_check_prompt():
-    prompt_path = Path(__file__).parent / "first_check_prompt"
+    prompt_path = Path(__file__).parent / "first_check_prompt.txt"
     return _read_text_with_fallback(prompt_path)
 
 
@@ -234,27 +234,15 @@ def truncate_text(text, max_length):
 
 
 def prepare_summary_text(summary):
-    prepared = (summary or "").strip()
-    if len(prepared) > SAFE_SUMMARY_LIMIT:
-        logging.warning(
-            "[OPENAI WARN] summary_too_long=%s truncating_to=%s",
-            len(prepared),
-            SAFE_SUMMARY_LIMIT,
-        )
-        prepared = truncate_text(prepared, SAFE_SUMMARY_LIMIT)
-
-    if len(prepared) > SAFE_SUMMARY_LIMIT:
-        raise RuntimeError("Prepared summary is too long for Telegram.")
-
-    return prepared
+    return (summary or "").strip()
 
 
 def build_final_summary_materials(news_items):
     formatted_parts = []
     for item in news_items:
         summary = (item.get("summary") or "").strip()
-        summary_line = f"\nSummary: {truncate_text(summary, 1000)}" if summary else ""
-        formatted_parts.append(f"[{item['source']}] {item['title']} - {item['link']}{summary_line}")
+        summary_line = f"\nSummary: {summary}" if summary else ""
+        formatted_parts.append(f"[{item['source']}] {item['title']}\nDate: {item.get('date', '')}\n{item['link']}{summary_line}")
     return "\n".join(formatted_parts)
 
 
@@ -270,9 +258,9 @@ def ask_final_summary_model(materials):
     }
     prompt = load_final_prompt()
     payload = {
-        "model": "openai/gpt-4.1-mini",
+        "model": MODEL,
         "temperature": 0.1,
-        "max_tokens": 700,
+        "max_tokens": MAX_OUTPUT_TOKENS,
         "messages": [
             {"role": "system", "content": prompt},
             {"role": "user", "content": materials}
@@ -281,16 +269,8 @@ def ask_final_summary_model(materials):
 
     response = None
     try:
-        response = requests.post(
-            url,
-            json=payload,
-            headers=headers,
-            **get_openrouter_request_kwargs(timeout=60),
-        )
-        status_code = response.status_code
-        response.raise_for_status()
-
-        data = response.json()
+        data = post_completion(payload, headers, **get_openrouter_request_kwargs(timeout=180))
+        status_code = 200
         usage = data.get("usage", {})
         result = data["choices"][0]["message"]["content"].strip()
         logging.info(
@@ -381,11 +361,11 @@ def first_check_filter_news(news_items):
         "Content-Type": "application/json"
     }
     prompt = load_first_check_prompt()
-    materials = json.dumps(news_items, ensure_ascii=False, indent=2)
+    materials = json.dumps([_normalize_news_item(item) for item in news_items], ensure_ascii=False, indent=2)
     payload = {
-        "model": "openai/gpt-4.1-mini",
+        "model": MODEL,
         "temperature": 0.0,
-        "max_tokens": 8000,
+        "max_tokens": MAX_OUTPUT_TOKENS,
         "messages": [
             {"role": "system", "content": prompt},
             {"role": "user", "content": materials}
@@ -396,14 +376,7 @@ def first_check_filter_news(news_items):
     for attempt in range(1, FIRST_CHECK_MAX_RETRIES + 1):
         response = None
         try:
-            response = requests.post(
-                url,
-                json=payload,
-                headers=headers,
-                **get_openrouter_request_kwargs(timeout=FIRST_CHECK_TIMEOUT),
-            )
-            response.raise_for_status()
-            data = response.json()
+            data = post_completion(payload, headers, **get_openrouter_request_kwargs(timeout=180))
             result_text = data["choices"][0]["message"]["content"]
             parsed = _extract_json_payload(result_text)
 
@@ -416,12 +389,18 @@ def first_check_filter_news(news_items):
                 raise ValueError("first_check model response is not a JSON list.")
 
             filtered = []
+            originals = {str(item.get("link", "")).strip(): item for item in news_items}
+            selected = set()
             for item in parsed:
                 if not isinstance(item, dict):
-                    continue
+                    raise ValueError("first_check returned an invalid item.")
                 normalized = _normalize_news_item(item)
-                if normalized["title"] and normalized["link"] and normalized["source"]:
-                    filtered.append(normalized)
+                link = normalized["link"]
+                if link not in originals or link in selected:
+                    raise ValueError("first_check returned an unknown or duplicate URL.")
+                selected.add(link)
+                # The model selects news; it cannot change provenance or source text.
+                filtered.append(dict(originals[link]))
 
             logging.info("[FIRST CHECK] input_items=%s output_items=%s", len(news_items), len(filtered))
             return filtered
@@ -460,11 +439,11 @@ def rewrite_summaries_with_model(news_items):
         "Content-Type": "application/json"
     }
     prompt = load_summary_rewriter_prompt()
-    materials = json.dumps(news_items, ensure_ascii=False, indent=2)
+    materials = json.dumps([_normalize_news_item(item) for item in news_items], ensure_ascii=False, indent=2)
     payload = {
-        "model": "openai/gpt-4.1-mini",
+        "model": MODEL,
         "temperature": 0.0,
-        "max_tokens": 9000,
+        "max_tokens": MAX_OUTPUT_TOKENS,
         "messages": [
             {"role": "system", "content": prompt},
             {"role": "user", "content": materials}
@@ -475,14 +454,7 @@ def rewrite_summaries_with_model(news_items):
     for attempt in range(1, FIRST_CHECK_MAX_RETRIES + 1):
         response = None
         try:
-            response = requests.post(
-                url,
-                json=payload,
-                headers=headers,
-                **get_openrouter_request_kwargs(timeout=FIRST_CHECK_TIMEOUT),
-            )
-            response.raise_for_status()
-            data = response.json()
+            data = post_completion(payload, headers, **get_openrouter_request_kwargs(timeout=180))
             result_text = data["choices"][0]["message"]["content"]
             parsed = _extract_json_payload(result_text)
 
@@ -523,11 +495,11 @@ def rewrite_summaries_with_model(news_items):
                 new_item = dict(original)
                 new_summary = str(item.get("summary", "")).strip()
                 if new_summary:
-                    new_item["summary"] = new_summary[:2000]
+                    new_item["summary"] = new_summary
                 rewritten.append(new_item)
 
-            if not rewritten:
-                raise ValueError("summary_rewriter returned no matched items.")
+            if len(rewritten) != len(news_items) or len({(i["source"], i["link"]) for i in rewritten}) != len({(i["source"], i["link"]) for i in news_items}):
+                raise ValueError("summary_rewriter did not return every input item exactly once.")
 
             logging.info("[SUMMARY REWRITER] input_items=%s output_items=%s", len(news_items), len(rewritten))
             return rewritten
@@ -656,6 +628,15 @@ def extract_nearby_treasury_date(anchor_tag):
         node = node.parent
         if not node:
             break
+        timestamp = node.find("time", datetime=True)
+        if timestamp:
+            try:
+                parsed = datetime.fromisoformat(timestamp["datetime"].replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.astimezone(timezone.utc)
+            except ValueError:
+                pass
         text = node.get_text(" ", strip=True)
         match = month_pattern.search(text)
         if match:
@@ -680,12 +661,14 @@ def fetch_us_treasury_candidate_news():
     if not links:
         return results
 
-    release_link_pattern = re.compile(r"^/news/press-releases/(sb|sm|jy|jl)\d+$", re.IGNORECASE)
+    release_link_pattern = re.compile(r"^/news/press-releases/(sb|sm|jy|jl)\d+/?$", re.IGNORECASE)
     seen = set()
 
     for anchor in links:
         href = (anchor.get("href") or "").strip()
-        if not release_link_pattern.match(href):
+        full_link = urljoin(US_TREASURY_CANDIDATE_URL, href)
+        parsed_link = urlsplit(full_link)
+        if parsed_link.hostname != "home.treasury.gov" or not release_link_pattern.fullmatch(parsed_link.path):
             continue
 
         title = anchor.get_text(" ", strip=True)
@@ -696,7 +679,7 @@ def fetch_us_treasury_candidate_news():
         if not published_dt or not is_within_24h(published_dt):
             continue
 
-        full_link = urljoin(US_TREASURY_CANDIDATE_URL, href)
+        full_link = urlunsplit(("https", parsed_link.netloc, parsed_link.path.rstrip("/"), "", ""))
         key = (title, full_link)
         if key in seen:
             continue
@@ -721,8 +704,6 @@ def get_official_updates():
             response = requests.get(rss_url, headers=HEADERS, timeout=20, allow_redirects=True)
 
             if not check_response_status(response, source_name):
-                if source_name == "US Treasury":
-                    updates.extend(fetch_us_treasury_candidate_news())
                 continue
 
             feed = feedparser.parse(response.content)
@@ -730,8 +711,6 @@ def get_official_updates():
             log_source_count(source_name, total_entries, "feed entries", response.status_code)
 
             if total_entries == 0:
-                if source_name == "US Treasury":
-                    updates.extend(fetch_us_treasury_candidate_news())
                 continue
 
             for entry in feed.entries[:40]:
@@ -741,9 +720,8 @@ def get_official_updates():
 
         except Exception:
             logging.exception("[RSS ERROR] %s", source_name)
-            if source_name == "US Treasury":
-                updates.extend(fetch_us_treasury_candidate_news())
 
+    updates.extend(fetch_us_treasury_candidate_news())
     return updates
 
 
@@ -947,46 +925,65 @@ def fetch_bis_news():
 
 
 def fetch_uksi_sanctions():
-    off_url = "https://www.legislation.gov.uk/uksi"
-    url = "https://www.legislation.gov.uk/title/sanctions/data.feed"
-    yesterday_formatted = (datetime.now() - timedelta(days=1)).strftime("%d.%m.%Y")
-
+    # The general title search also includes old EU acts. The new/uksi feed
+    # contains newly published UK instruments, ordered by publication time.
+    url = UKSI_FEED_URL + "?results-count=100"
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=2)
     results = []
+    visited = set()
+    seen_links = set()
+    keywords = ['sanctions', 'financial', 'trade', 'export', 'russia',
+                'belarus', 'iran', 'ukraine', 'asset freeze']
     try:
-        response = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=True)
-        if not check_response_status(response, "UK Statutory Instruments"):
-            return []
+        while url and url not in visited:
+            visited.add(url)
+            response = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=True)
+            if not check_response_status(response, "UK Statutory Instruments"):
+                break
 
-        feed = feedparser.parse(response.content)
-        log_source_count("UK Statutory Instruments", len(feed.entries), "feed entries", response.status_code)
-        if not feed.entries:
-            return []
+            feed = feedparser.parse(response.content)
+            log_source_count("UK Statutory Instruments", len(feed.entries), "feed entries", response.status_code)
+            if not feed.entries:
+                break
 
-        for entry in feed.entries[:20]:
-            published = entry.get('published_parsed') or entry.get('updated_parsed')
-            if published:
-                pub_date = datetime(*published[:6])
-                if datetime.now() - pub_date > timedelta(days=2):
+            dates = []
+            for entry in feed.entries:
+                # An edit to an old act must not turn it into a new publication.
+                published = entry.get('published_parsed')
+                if not published:
+                    continue
+                pub_date = datetime(*published[:6], tzinfo=timezone.utc)
+                dates.append(pub_date)
+                if not cutoff <= pub_date <= now:
                     continue
 
-            title = entry.get('title', '').strip()
-            link = entry.get('link', '').strip()
-
-            keywords = ['sanctions', 'financial', 'trade', 'export', 'russia',
-                        'belarus', 'iran', 'ukraine', 'asset freeze']
-            if any(kw in title.lower() for kw in keywords):
+                title = entry.get('title', '').strip()
+                link = entry.get('link', '').strip()
+                if not title or not link or link in seen_links:
+                    continue
+                if not any(kw in title.lower() for kw in keywords):
+                    continue
+                seen_links.add(link)
                 results.append({
                     "source": "UK Statutory Instruments",
                     "title": title,
-                    "date": yesterday_formatted,
+                    "date": pub_date.strftime("%d.%m.%Y"),
                     "link": link
                 })
 
+            if len(dates) == len(feed.entries) and max(dates) < cutoff:
+                break
+            next_url = next((item.get('href') for item in feed.feed.get('links', [])
+                             if item.get('rel') == 'next'), None)
+            url = urljoin(response.url, next_url) if next_url else None
+            if url and urlsplit(url).hostname != "www.legislation.gov.uk":
+                logging.warning("[UKSI ATOM] ignoring unexpected pagination URL")
+                break
+
     except Exception:
         logging.exception("[UKSI ATOM ERROR]")
-        return []
-
-    return results[:10]
+    return results
 
 
 def fetch_uk_designations_updates():
@@ -1352,24 +1349,9 @@ def extract_summary_from_tavily_item(extract_item):
 
 
 def tavily_extract_urls(api_key, urls, extract_depth="advanced", timeout_sec=45.0, content_format="text"):
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    response = requests.post(
-        TAVILY_EXTRACT_URL,
-        headers=headers,
-        json={
-            "api_key": api_key,
-            "urls": urls,
-            "extract_depth": extract_depth,
-            "format": content_format,
-            "timeout": timeout_sec,
-        },
-        timeout=TAVILY_TIMEOUT,
-    )
-    response.raise_for_status()
-    return response.json()
+    from content_extraction import advanced_extract
+    return advanced_extract(api_key, urls)
+
 
 
 def build_extract_candidates(item):
@@ -1715,191 +1697,25 @@ def prefilter_probe_with_live_sources(news, live_sources_path="live_sources", lo
 
 
 def tavily_search_fallback_summary(api_key, item):
-    title = (item.get("title") or "").strip()
+    # Compatibility for the old diagnostic helper: exact-URL extraction only.
+    from content_extraction import advanced_extract, clean, usable
     link = (item.get("link") or "").strip()
-    if not title:
+    if not link:
         return ""
+    data = advanced_extract(api_key, [link], query=item.get("title"))
+    for result in data.get("results", []):
+        text = clean(result.get("raw_content") or "")
+        if usable(text):
+            return text
+    return ""
 
-    domain = urlparse(link).netloc if link else ""
-    query = title if not domain else f"{title} site:{domain}"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "api_key": api_key,
-        "query": query,
-        "topic": "general",
-        "search_depth": "advanced",
-        "max_results": 1,
-        "include_raw_content": "text",
-    }
-    if domain:
-        payload["include_domains"] = [domain]
-
-    try:
-        response = requests.post(TAVILY_SEARCH_URL, headers=headers, json=payload, timeout=40)
-        response.raise_for_status()
-        data = response.json()
-        results = data.get("results", [])
-        if not results:
-            return ""
-
-        top = results[0]
-        raw = (top.get("raw_content") or "").strip()
-        content = (top.get("content") or "").strip()
-        summary = raw[:1000] if raw else content[:1000]
-        return clean_summary_text(summary)
-    except Exception:
-        logging.exception("[TAVILY][SEARCH] fallback failed for link=%s", link)
-        return ""
 
 
 def enrich_news_with_tavily_summary(news):
-    api_key = os.getenv("TAVILY_API_KEY", "").strip()
-    if not api_key:
-        logging.warning("[TAVILY] TAVILY_API_KEY is empty, enrichment skipped")
-        return news
+    # Keep the public entry point used by manage.py and local pipeline tests.
+    from content_extraction import enrich_news
+    return enrich_news(news)
 
-    # First pass: source-specific extraction for problematic structures.
-    source_specific_updates = 0
-    for item in news:
-        source = item.get("source")
-        if source in RSS_SOURCES:
-            continue
-        current = clean_summary_text(item.get("summary", ""))
-        if current and not is_low_quality_summary(current):
-            continue
-
-        direct = clean_summary_text(extract_source_specific_summary(item))
-        if direct and not is_low_quality_summary(direct):
-            item["summary"] = direct
-            source_specific_updates += 1
-
-    if source_specific_updates:
-        logging.info("[DIRECT EXTRACT] source-specific summaries updated=%s", source_specific_updates)
-
-    links_by_source = build_missing_summary_links(news)
-    if not links_by_source:
-        logging.info("[TAVILY] No missing summaries, enrichment skipped")
-        return news
-
-    link_to_summary = {}
-    total_links = sum(len(v) for v in links_by_source.values())
-    logging.info("[TAVILY] Enrichment started: %s links from %s sources", total_links, len(links_by_source))
-
-    failed_links = set()
-    for source_name, source_links in links_by_source.items():
-        for batch in chunked(source_links, TAVILY_BATCH_SIZE):
-            try:
-                payload = tavily_extract_urls(
-                    api_key=api_key,
-                    urls=batch,
-                    extract_depth="advanced",
-                    timeout_sec=45.0,
-                    content_format="text",
-                )
-            except requests.exceptions.Timeout:
-                logging.warning("[TAVILY] Timeout for source=%s batch_size=%s", source_name, len(batch))
-                failed_links.update(batch)
-                continue
-            except Exception:
-                logging.exception("[TAVILY] Extract error for source=%s batch_size=%s", source_name, len(batch))
-                failed_links.update(batch)
-                continue
-
-            results = payload.get("results", [])
-            failed_results = payload.get("failed_results", [])
-            if not isinstance(results, list):
-                logging.warning("[TAVILY] Invalid response format for source=%s", source_name)
-                failed_links.update(batch)
-                continue
-
-            success_urls = set()
-            for item in results:
-                url = (item.get("url") or "").strip()
-                if not url:
-                    continue
-                success_urls.add(url)
-                summary = extract_summary_from_tavily_item(item)
-                summary = clean_summary_text(summary)
-                if summary and not is_low_quality_summary(summary):
-                    link_to_summary[url] = summary
-
-            for fr in failed_results if isinstance(failed_results, list) else []:
-                fr_url = (fr.get("url") or "").strip() if isinstance(fr, dict) else ""
-                if fr_url:
-                    failed_links.add(fr_url)
-            for requested_url in batch:
-                if requested_url not in success_urls:
-                    failed_links.add(requested_url)
-
-            logging.info(
-                "[TAVILY] source=%s batch=%s processed, summaries_collected=%s",
-                source_name,
-                len(batch),
-                len(link_to_summary)
-            )
-
-    # Per-link fallback for missing/low-quality summaries (extract candidates + Tavily search).
-    for item in news:
-        source = item.get("source")
-        if source in RSS_SOURCES:
-            continue
-        link = (item.get("link") or "").strip()
-        existing = clean_summary_text(item.get("summary", ""))
-        if existing and not is_low_quality_summary(existing):
-            continue
-
-        if link in link_to_summary and not is_low_quality_summary(link_to_summary[link]):
-            continue
-
-        fallback_summary = ""
-        candidates = build_extract_candidates(item)
-        if candidates:
-            try:
-                payload = tavily_extract_urls(
-                    api_key=api_key,
-                    urls=candidates,
-                    extract_depth="advanced",
-                    timeout_sec=50.0,
-                    content_format="text",
-                )
-                for res in payload.get("results", []):
-                    candidate_summary = clean_summary_text(extract_summary_from_tavily_item(res))
-                    if candidate_summary and not is_low_quality_summary(candidate_summary):
-                        fallback_summary = candidate_summary
-                        break
-            except Exception:
-                logging.exception("[TAVILY][FALLBACK EXTRACT] failed for link=%s", link)
-
-        if not fallback_summary:
-            fallback_summary = tavily_search_fallback_summary(api_key, item)
-
-        if not fallback_summary:
-            fallback_summary = make_fallback_summary_from_title(item)
-
-        if fallback_summary:
-            link_to_summary[link] = fallback_summary
-
-    enriched_count = 0
-    for item in news:
-        source = item.get("source")
-        if source in RSS_SOURCES:
-            continue
-        link = (item.get("link") or "").strip()
-        summary = link_to_summary.get(link, "")
-        if summary:
-            item["summary"] = summary
-            enriched_count += 1
-
-    logging.info(
-        "[TAVILY] Enrichment finished: %s/%s items updated, failed_links=%s",
-        enriched_count,
-        len(news),
-        len(failed_links),
-    )
-    return news
 
 
 def collect_all_news():

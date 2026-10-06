@@ -20,6 +20,9 @@ from sources_big import enrich_news_with_tavily_summary
 from sources_big import first_check_filter_news
 from sources_big import get_openrouter_request_kwargs
 from sources_big import rewrite_summaries_with_model
+from sources_big import ask_final_summary_model, build_final_summary_materials
+from storage_maintenance import prune_bot_cache
+from message_utils import split_message
 
 logging.basicConfig(
     level=logging.INFO,
@@ -74,7 +77,7 @@ def load_prompt():
 
 
 # ================== DATABASE ==================
-conn = sqlite3.connect("bot.db")
+conn = sqlite3.connect(Path(__file__).with_name("bot.db"))
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -98,10 +101,10 @@ CREATE TABLE IF NOT EXISTS daily_news_cache (
 """)
 
 conn.commit()
+prune_bot_cache(conn)
 
 NO_NEWS = "NO_NEWS_LAST_24_HOURS"
 TELEGRAM_MESSAGE_LIMIT = 4096
-SAFE_SUMMARY_LIMIT = 3500
 
 
 def truncate_text(text: str, max_length: int) -> str:
@@ -115,134 +118,11 @@ def truncate_text(text: str, max_length: int) -> str:
 
 
 def prepare_summary_text(summary: str) -> str:
-    prepared = summary.strip()
-    if len(prepared) > SAFE_SUMMARY_LIMIT:
-        logging.warning(
-            "[OPENAI WARN] summary_too_long=%s truncating_to=%s",
-            len(prepared),
-            SAFE_SUMMARY_LIMIT,
-        )
-        prepared = truncate_text(prepared, SAFE_SUMMARY_LIMIT)
-
-    if len(prepared) > SAFE_SUMMARY_LIMIT:
-        raise RuntimeError("Prepared summary is too long for Telegram.")
-
-    return prepared
-
-
-# ================== OPENAI ==================
-def _legacy_ask_model(materials: str) -> str:
-    url = "https://openrouter.ai/api/v1/chat/completions"
-
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    PROMPT = load_prompt()
-
-    payload = {
-        "model": "openai/gpt-4.1-mini",
-        "temperature": 0.1,
-        "max_tokens": 700,
-        "messages": [
-            {
-                "role": "system",
-                "content": PROMPT
-            },
-            {
-                "role": "user",
-                "content": materials
-            }
-        ]
-    }
-
-    response = requests.post(
-        url,
-        json=payload,
-        headers=headers,
-        **get_openrouter_request_kwargs(timeout=60),
-    )
-    response.raise_for_status()
-
-    result = response.json()["choices"][0]["message"]["content"].strip()
-    # logging.debug(result)
-    if result == "NO_NEWS_LAST_24_HOURS":
-        return "За последние 24 часа санкционных новостей не опубликовано."
-
-    # return result
-    sources_str = "Проверенные источники: " + ", ".join(SOURCE_KEYS)
-    return f"{result}\n\n{sources_str}"
+    return summary.strip()
 
 
 def ask_model(materials: str) -> str:
-    if not OPENROUTER_API_KEY:
-        raise RuntimeError("OPENROUTER_API_KEY is missing.")
-
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    prompt = load_prompt()
-    payload = {
-        "model": "openai/gpt-4.1-mini",
-        "temperature": 0.1,
-        "max_tokens": 700,
-        "messages": [
-            {
-                "role": "system",
-                "content": prompt
-            },
-            {
-                "role": "user",
-                "content": materials
-            }
-        ]
-    }
-
-    response = None
-    try:
-        response = requests.post(
-            url,
-            json=payload,
-            headers=headers,
-            **get_openrouter_request_kwargs(timeout=60),
-        )
-        status_code = response.status_code
-        response_text = (response.text or "")[:500]
-        response.raise_for_status()
-
-        data = response.json()
-        usage = data.get("usage", {})
-        result = data["choices"][0]["message"]["content"].strip()
-        logging.info(
-            "[OPENAI OK] status=%s input_chars=%s output_chars=%s prompt_tokens=%s completion_tokens=%s preview=%r",
-            status_code,
-            len(materials),
-            len(result),
-            usage.get("prompt_tokens", "n/a"),
-            usage.get("completion_tokens", "n/a"),
-            result[:200],
-        )
-        if result == NO_NEWS:
-            return "No sanctions news affecting Russia were found in the last 24 hours."
-
-        sources_str = "Verified sources: " + ", ".join(SOURCE_KEYS)
-        return prepare_summary_text(f"{result}\n\n{sources_str}")
-    except Exception as e:
-        status_code = getattr(response, "status_code", "no-response")
-        response_text = ""
-        if response is not None:
-            response_text = (response.text or "")[:500]
-
-        logging.exception(
-            "[OPENAI ERROR] status=%s input_chars=%s body=%r",
-            status_code,
-            len(materials),
-            response_text,
-        )
-        raise RuntimeError("OpenAI summary is temporarily unavailable.")
+    return ask_final_summary_model(materials)
 
 
 def _short_user_error(error: Exception) -> str:
@@ -253,19 +133,12 @@ def _short_user_error(error: Exception) -> str:
 
 
 def build_news_message(news: str) -> str:
-    message_text = f"Сводка санкционных новостей:\n\n{news}"
-    if len(message_text) > TELEGRAM_MESSAGE_LIMIT:
-        logging.warning(
-            "[TELEGRAM SKIP] message_chars=%s summary_chars=%s",
-            len(message_text),
-            len(news),
-        )
-        raise RuntimeError("Prepared message is too long for Telegram.")
-    return message_text
+    return f"Сводка санкционных новостей:\n\n{news}"
 
 
 # ================== BUSINESS LOGIC ==================
 def _get_news_for_today_impl() -> str:
+    prune_bot_cache(conn)
     today = date.today().isoformat()
 
     cursor.execute(
@@ -309,12 +182,7 @@ def _get_news_for_today_impl() -> str:
     rewritten_items = rewrite_summaries_with_model(enriched_items)
     logging.info("[NEWS AFTER SUMMARY REWRITE] items=%s", len(rewritten_items))
 
-    formatted_parts = []
-    for n in rewritten_items:
-        summary = (n.get("summary") or "").strip()
-        summary_line = f"\nSummary: {truncate_text(summary, 1000)}" if summary else ""
-        formatted_parts.append(f"[{n['source']}] {n['title']} - {n['link']}{summary_line}")
-    formatted = "\n".join(formatted_parts)
+    formatted = build_final_summary_materials(rewritten_items)
 
     logging.info("[NEWS INPUT] chars=%s", len(formatted))
     summary = ask_model(formatted)
@@ -325,12 +193,6 @@ def _get_news_for_today_impl() -> str:
         "INSERT INTO daily_news_cache (date, content) VALUES (?, ?)",
         (today, summary)
     )
-    conn.commit()
-
-    cursor.execute("""
-        DELETE FROM daily_news_cache
-        WHERE date < date('now', '-7 days')
-    """)
     conn.commit()
 
     return summary
@@ -392,7 +254,8 @@ async def send_news(message: types.Message):
         news = get_news_for_today()
         message_text = build_news_message(news)
 
-        await message.answer(message_text)
+        for chunk in split_message(message_text):
+            await message.answer(chunk)
         cursor.execute(
             "INSERT OR REPLACE INTO news_requests (chat_id, last_date) VALUES (?, ?)",
             (chat_id, today)
@@ -433,11 +296,8 @@ async def send_daily_news():
             continue
 
         try:
-            await bot.send_message(
-                chat_id,
-                message_text,
-                reply_markup=ReplyKeyboardRemove()
-            )
+            for chunk in split_message(message_text):
+                await bot.send_message(chat_id, chunk, reply_markup=ReplyKeyboardRemove())
             cursor.execute(
                 "INSERT OR REPLACE INTO news_requests (chat_id, last_date) VALUES (?, ?)",
                 (chat_id, today)
