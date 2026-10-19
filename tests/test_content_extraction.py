@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
-from content_extraction import Extractor, Store, advanced_extract, clean
+from content_extraction import Extractor, Store, advanced_extract, clean, recent_changes
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
@@ -130,15 +130,80 @@ class ContentTests(unittest.TestCase):
         with self.store.connect() as db:
             self.assertAlmostEqual(db.execute('SELECT SUM(credits) FROM spend').fetchone()[0], 0.4)
 
-    def test_govuk_api_uses_change_history_instead_of_rss_description(self):
+    def test_govuk_article_body_does_not_include_revision_history(self):
         extractor = Extractor(self.store)
         self.addCleanup(extractor.session.close)
         data = {'details': {'change_history': [{'public_timestamp': '2026-10-06T10:00:00Z',
-                                              'note': ARTICLE}], 'body': '<p>Standing page</p>'}}
+                                              'note': 'Old correction'}], 'body': '<p>' + ARTICLE + '</p>'}}
         with patch.object(extractor, 'download', return_value=(json.dumps(data).encode(), 'application/json')):
             text, _, origin = extractor.local({'link': 'https://www.gov.uk/guidance/example', 'summary': 'General list'})
         self.assertIn(ARTICLE.strip(), text)
+        self.assertNotIn('Old correction', text)
         self.assertEqual(origin, 'govuk_api')
+
+    def govuk_run(self, history, path='/government/publications/the-uk-sanctions-list', **extra):
+        extractor = Extractor(self.store)
+        self.addCleanup(extractor.session.close)
+        data = {'document_type': 'guidance', 'details': {'change_history': history,
+                'body': 'OFSI Consolidated List closed in January. ' + ARTICLE}, **extra}
+        item = dict(source='UK FCDO', title='Sanctions list', date='16.10.2026',
+                    link='https://www.gov.uk' + path, summary=ARTICLE)
+        now = datetime(2026, 10, 16, 18, tzinfo=timezone.utc)
+        with patch.object(extractor, 'download', return_value=(json.dumps(data).encode(), 'application/json')), \
+             patch('content_extraction.recent_changes', side_effect=lambda d: recent_changes(d, now)), \
+             patch('content_extraction.advanced_extract') as advanced:
+            result = extractor.enrich([item])
+            advanced.assert_not_called()
+        return result
+
+    def test_uk_list_excludes_other_regimes_and_preserves_event_date(self):
+        history = [dict(public_timestamp='2026-10-16T10:00:00Z', note="Made 3 variations under the ISIL and Al-Qaida regime."),
+                   dict(public_timestamp='2026-10-15T10:00:00Z', note='Made 1 variation under the Russia sanctions regime.')]
+        result = self.govuk_run(history)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]['date'], '15.10.2026')
+        self.assertEqual(result[0]['summary'], history[1]['note'])
+        self.assertNotIn('OFSI', str(result))
+        self.assertNotIn('ISIL', str(result))
+
+    def test_other_govuk_histories_are_separate_even_on_same_day(self):
+        history = [dict(public_timestamp='2026-10-16T10:00:00Z', note='First change.'),
+                   dict(public_timestamp='2026-10-16T11:00:00Z', note='Second change.')]
+        result = self.govuk_run(history, path='/guidance/russia-list-of-designations-and-sanctions-notices')
+        self.assertEqual(len(result), 2)
+        self.assertEqual({i['summary'] for i in result}, {'First change.', 'Second change.'})
+        self.assertNotIn('OFSI', str(result))
+
+    def test_stale_future_and_non_russia_changes_do_not_fall_back(self):
+        history = [dict(public_timestamp='2026-10-12T10:00:00Z', note='Russia old change'),
+                   dict(public_timestamp='2026-10-17T10:00:00Z', note='Russia future change'),
+                   dict(public_timestamp='2026-10-16T10:00:00Z', note='ISIL change')]
+        self.assertEqual(self.govuk_run(history), [])
+
+    def test_mixed_regime_note_keeps_only_russia_clause(self):
+        result = self.govuk_run([dict(public_timestamp='2026-10-16T10:00:00Z',
+            note='Made 3 corrections under the Russia sanctions regime and 1 correction under the Libya Sanctions regime.')])
+        self.assertEqual(len(result), 1)
+        self.assertNotIn('Libya', result[0]['summary'])
+
+    def test_govuk_api_failure_never_falls_back_to_whole_page(self):
+        extractor = Extractor(self.store)
+        self.addCleanup(extractor.session.close)
+        with patch.object(extractor, 'download', side_effect=TimeoutError), patch('content_extraction.advanced_extract') as advanced:
+            self.assertEqual(extractor.enrich([dict(link='https://www.gov.uk/guidance/list', summary=ARTICLE)]), [])
+            advanced.assert_not_called()
+
+    def test_ofac_does_not_merge_unrelated_linked_document(self):
+        extractor = Extractor(self.store)
+        self.addCleanup(extractor.session.close)
+        html = b'<article><a href="/media/123/download">Other action</a></article>'
+        with patch.object(extractor, 'download', return_value=(html, 'text/html')), \
+             patch('content_extraction.trafilatura.extract', return_value=ARTICLE), \
+             patch.object(extractor, 'document') as document:
+            text, links, _ = extractor.local(dict(link='https://ofac.treasury.gov/recent-actions/20261016'))
+        self.assertEqual(text, ARTICLE.strip())
+        self.assertEqual(len(links), 1)
+        document.assert_not_called()
 
     def test_xml_explanatory_notes_and_rss_html(self):
         extractor = Extractor(self.store)

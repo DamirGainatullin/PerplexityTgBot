@@ -247,6 +247,8 @@ def build_final_summary_materials(news_items):
 
 
 def ask_final_summary_model(materials):
+    if not materials.strip():
+        return "No sanctions news affecting Russia were found in the last 24 hours."
     api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY is missing.")
@@ -498,7 +500,8 @@ def rewrite_summaries_with_model(news_items):
                     new_item["summary"] = new_summary
                 rewritten.append(new_item)
 
-            if len(rewritten) != len(news_items) or len({(i["source"], i["link"]) for i in rewritten}) != len({(i["source"], i["link"]) for i in news_items}):
+            identity = lambda i: (i['source'], i['title'], i['link'], i['date'])
+            if Counter(map(identity, rewritten)) != Counter(map(identity, news_items)):
                 raise ValueError("summary_rewriter did not return every input item exactly once.")
 
             logging.info("[SUMMARY REWRITER] input_items=%s output_items=%s", len(news_items), len(rewritten))

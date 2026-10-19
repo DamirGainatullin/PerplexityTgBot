@@ -23,6 +23,20 @@ from pypdf import PdfReader
 MAX_BYTES = 15 * 1024 * 1024
 MAX_TEXT = 6000
 HEADERS = {"User-Agent": "Mozilla/5.0"}
+CONTENT_CACHE_VERSION = 2
+
+
+def recent_changes(details, now=None):
+    now = now or datetime.now(timezone.utc)
+    result = []
+    for entry in details.get('change_history', []):
+        try:
+            stamp = datetime.fromisoformat(entry['public_timestamp'].replace('Z', '+00:00'))
+            if timedelta(0) <= now - stamp <= timedelta(hours=48) and clean(entry.get('note', '')):
+                result.append((entry, stamp))
+        except (KeyError, ValueError, TypeError):
+            continue
+    return sorted(result, key=lambda pair: pair[1], reverse=True)
 
 
 def clean(text):
@@ -143,6 +157,46 @@ class Extractor:
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
 
+    def govuk_updates(self, item):
+        """Expand standing-page history into dated events, never into a digest."""
+        url = item['link']
+        body, _ = self.download('https://www.gov.uk/api/content' + urlsplit(url).path)
+        data = json.loads(body)
+        details = data.get('details', {})
+        sanctions_index = urlsplit(url).path.rstrip('/') == '/government/publications/the-uk-sanctions-list'
+        # Articles have their own substantive body, even when corrected later.
+        if data.get('document_type') in ('news_story', 'press_release', 'speech', 'statement_to_parliament'):
+            return None
+        if not details.get('change_history'):
+            return [] if sanctions_index else None
+        if all(clean(e.get('note', '')).lower().rstrip('.') in ('first published', 'published')
+               for e in details['change_history']):
+            return None
+        events = []
+        seen = set()
+        for entry, stamp in recent_changes(details):
+            note = clean(entry['note'])
+            if note.lower().rstrip('.') in ('first published', 'published'):
+                continue
+            if sanctions_index:
+                # This index covers all regimes. Retain only explicit Russia changes.
+                clauses = re.split(r'(?<=[.;])\s+|\s+and\s+(?=\d+\s+(?:correction|variation|amendment|designation|specification))', note, flags=re.I)
+                note = ' '.join(c for c in clauses if re.search(r'\brussia(?:n)?\b', c, re.I))
+                if not note:
+                    continue
+            identity = entry['public_timestamp'] + '\n' + note
+            if identity in seen:
+                continue
+            seen.add(identity)
+            event = dict(item)
+            event.update(title=f"{item.get('title', data.get('title', 'GOV.UK'))}: {note}",
+                         date=stamp.strftime('%d.%m.%Y'), summary=note,
+                         link=url.split('#')[0],
+                         summary_origin='govuk_change', summary_status='extracted',
+                         content_urls=[url.split('#')[0]], event_timestamp=entry['public_timestamp'])
+            events.append(event)
+        return events
+
     def download(self, url):
         with self.session.get(url, timeout=(10, 30), stream=True) as response:
             response.raise_for_status()
@@ -172,35 +226,9 @@ class Extractor:
         body, _ = self.download("https://www.gov.uk/api/content" + urlsplit(url).path)
         data = json.loads(body)
         details = data.get("details", {})
-        history = sorted(details.get("change_history", []),
-                         key=lambda h: h.get("public_timestamp", ""), reverse=True)
-        parts, links = [], [url]
-        recent = []
-        for entry in history:
-            try:
-                stamp = datetime.fromisoformat(entry["public_timestamp"].replace("Z", "+00:00"))
-                if timedelta(0) <= datetime.now(timezone.utc) - stamp <= timedelta(hours=48):
-                    recent.append((entry, stamp))
-            except (KeyError, ValueError, TypeError):
-                continue
-        if history:
-            # A standing page description is not a description of today's change.
-            selected = [entry for entry, _ in recent] or history[:1]
-            parts.append("Changes: " + " ".join(entry.get("public_timestamp", "") + " " + entry.get("note", "") for entry in selected))
-        parts.append(clean(details.get("body", ""))[:2500])
-        for attachment in details.get("attachments", []):
-            target = attachment.get("url", "")
-            title = attachment.get("title", "")
-            matches_date = any(f"{stamp.day} {stamp.strftime('%B %Y')}" in title for _, stamp in recent)
-            if not matches_date or not (attachment.get("content_type") == "application/pdf" or '.pdf' in target.lower()):
-                continue
-            try:
-                parts.insert(1, self.document(target)[:3500])
-                links.append(target)
-            except Exception as exc:
-                logging.info("[CONTENT] Attachment unavailable: %s", type(exc).__name__)
-            if len(links) >= 3:
-                break
+        # Histories are expanded separately by govuk_updates; ordinary articles
+        # use only their own body, never a collection of revision notes.
+        parts, links = [clean(details.get("body", ""))[:MAX_TEXT]], [url]
         return clean(" ".join(parts))[:MAX_TEXT], links
 
     def local(self, item):
@@ -241,36 +269,39 @@ class Extractor:
             return self.document(url)[:MAX_TEXT], [url], "pdf"
         text = clean(trafilatura.extract(body, include_tables=True, include_comments=False) or "")
         links = [url]
-        if host == "ofac.treasury.gov":
-            soup = BeautifulSoup(body, 'html.parser')
-            article = soup.select_one('article')
-            parts = [text[:2000]]
-            if article:
-                candidates = article.select('.field--name-field-press-release-link a[href]')
-                candidates += [a for a in article.select('a[href]')
-                               if '/media/' in a['href'] or '.pdf' in a['href'].lower()]
-                for anchor in candidates:
-                    target = urljoin(url, anchor['href'])
-                    if target in links:
-                        continue
-                    try:
-                        extra = self.document(target)
-                        if usable(extra):
-                            parts.append(extra[:2000])
-                            links.append(target)
-                    except Exception as exc:
-                        logging.info("[CONTENT] OFAC linked document unavailable: %s", type(exc).__name__)
-                    if len(links) >= 3:
-                        break
-            text = clean(' '.join(parts))
+        # Linked press releases/PDFs may describe different actions. Do not
+        # append them indiscriminately to this publication's description.
         return text[:MAX_TEXT], links, "html"
 
     def enrich(self, news, use_cache=True):
+        expanded = []
+        seen_events = set()
         for item in news:
+            url = item.get('link', '')
+            if urlsplit(url).hostname == 'www.gov.uk':
+                try:
+                    events = self.govuk_updates(item)
+                except Exception as exc:
+                    # A generic page/Tavily fallback can reintroduce the entire
+                    # history. Omit unverified GOV.UK updates on API failure.
+                    logging.warning("[CONTENT] GOV.UK event extraction unavailable: %s", type(exc).__name__)
+                    continue
+                if events is not None:
+                    for event in events:
+                        key = (event['link'], event['event_timestamp'], event['summary'])
+                        if key not in seen_events:
+                            seen_events.add(key)
+                            expanded.append(event)
+                    logging.info("[CONTENT] GOV.UK separate updates=%s", len(events))
+                    continue
+            expanded.append(item)
+        for item in expanded:
+            if item.get('summary_origin') == 'govuk_change':
+                continue
             url = item.get('link', '')
             if not url:
                 continue
-            cache_key = hashlib.sha256(json.dumps([url, item.get('date'), item.get('title')]).encode()).hexdigest()
+            cache_key = hashlib.sha256(json.dumps([CONTENT_CACHE_VERSION, url, item.get('date'), item.get('title')]).encode()).hexdigest()
             result = self.store.get(cache_key) if use_cache else None
             if result:
                 item.update(result)
@@ -299,7 +330,7 @@ class Extractor:
             if text:
                 self.store.put(cache_key, result)
             logging.info("[CONTENT] %s: %s chars=%s", item.get('source'), origin, len(text))
-        return news
+        return expanded
 
 
 def enrich_news(news):

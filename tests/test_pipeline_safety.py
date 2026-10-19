@@ -13,9 +13,29 @@ from message_utils import split_message
 from storage_maintenance import prune_bot_cache
 from sources_big import prepare_summary_text, build_final_summary_materials, load_first_check_prompt
 from sources_big import first_check_filter_news
+from sources_big import rewrite_summaries_with_model, ask_final_summary_model
 
 
 class PipelineTests(unittest.TestCase):
+    def test_distinct_updates_with_same_url_survive_rewriter(self):
+        items = [dict(source='UK FCDO', title=title, date='16.10.2026',
+                      link='https://www.gov.uk/guidance/list', summary=title)
+                 for title in ('Russia correction', 'Russia designation')]
+        # A duplicated response must not silently replace the second event.
+        bad = {'choices': [{'message': {'content': json.dumps([items[0], items[0]])}}]}
+        good = {'choices': [{'message': {'content': json.dumps(items)}}]}
+        with patch.dict(os.environ, {'OPENROUTER_API_KEY': 'test'}), \
+             patch('sources_big.post_completion', side_effect=[bad, good]) as model, \
+             patch('sources_big.time.sleep'):
+            result = rewrite_summaries_with_model(items)
+        self.assertEqual(result, items)
+        self.assertEqual(model.call_count, 2)
+
+    def test_empty_events_skip_final_model(self):
+        with patch('sources_big.post_completion') as model:
+            self.assertIn('No sanctions news', ask_final_summary_model(''))
+            model.assert_not_called()
+
     def test_production_pipeline_caches_full_summary_without_telegram(self):
         # Load only business logic: importing manage.py would create a Telegram bot.
         tree = ast.parse(Path('manage.py').read_text(encoding='utf-8'))
