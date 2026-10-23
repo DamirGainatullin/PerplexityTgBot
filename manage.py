@@ -155,7 +155,7 @@ def _get_news_for_today_impl() -> str:
     logging.info("[NEWS COLLECTED RAW] items=%s", len(news_items))
 
     if not news_items:
-        text = "No sanctions news affecting Russia were found in the last 24 hours."
+        text = "No relevant sanctions or export-control news were found in the last 24 hours."
 
         cursor.execute(
             "INSERT INTO daily_news_cache (date, content) VALUES (?, ?)",
@@ -169,7 +169,7 @@ def _get_news_for_today_impl() -> str:
     logging.info("[NEWS AFTER FIRST CHECK] items=%s", len(filtered_items))
 
     if not filtered_items:
-        text = "No sanctions news affecting Russia were found in the last 24 hours."
+        text = "No relevant sanctions or export-control news were found in the last 24 hours."
         cursor.execute(
             "INSERT INTO daily_news_cache (date, content) VALUES (?, ?)",
             (today, text)

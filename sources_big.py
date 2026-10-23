@@ -210,7 +210,11 @@ def _read_text_with_fallback(path: Path):
 
 def load_first_check_prompt():
     prompt_path = Path(__file__).parent / "first_check_prompt.txt"
-    return _read_text_with_fallback(prompt_path)
+    return _read_text_with_fallback(prompt_path) + "\n\n" + load_relevance_policy()
+
+
+def load_relevance_policy():
+    return _read_text_with_fallback(Path(__file__).parent / "relevance_policy.txt")
 
 
 def load_summary_rewriter_prompt():
@@ -220,7 +224,7 @@ def load_summary_rewriter_prompt():
 
 def load_final_prompt():
     prompt_path = Path(__file__).parent / "prompt.txt"
-    return _read_text_with_fallback(prompt_path)
+    return _read_text_with_fallback(prompt_path) + "\n\n" + load_relevance_policy()
 
 
 def truncate_text(text, max_length):
@@ -248,7 +252,7 @@ def build_final_summary_materials(news_items):
 
 def ask_final_summary_model(materials):
     if not materials.strip():
-        return "No sanctions news affecting Russia were found in the last 24 hours."
+        return "No relevant sanctions or export-control news were found in the last 24 hours."
     api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY is missing.")
@@ -285,7 +289,7 @@ def ask_final_summary_model(materials):
             result[:200],
         )
         if result == NO_NEWS:
-            return "No sanctions news affecting Russia were found in the last 24 hours."
+            return "No relevant sanctions or export-control news were found in the last 24 hours."
 
         sources_str = "Verified sources: " + ", ".join(SOURCE_KEYS)
         return prepare_summary_text(f"{result}\n\n{sources_str}")
@@ -1779,7 +1783,7 @@ def run_local_prompt_summary_test(json_dump_path="local_news_dump.json", prompt_
     rewritten_items = pipeline["summary_rewritten"]
 
     if not rewritten_items:
-        summary = "No sanctions news affecting Russia were found in the last 24 hours."
+        summary = "No relevant sanctions or export-control news were found in the last 24 hours."
         dump_text_to_file("", prompt_input_path)
         dump_text_to_file(summary, summary_output_path)
         logging.info("[LOCAL PROMPT TEST] rewritten_items=0, summary generated from no-news fallback")
